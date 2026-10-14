@@ -1,5 +1,9 @@
 # ESP32-WROOM wiring and commissioning
 
+For PCB design, use the [PCB hardware and circuit specification](PCB_HARDWARE_SPEC.md).
+It separates the existing bench wiring from proposed carrier circuitry and
+lists the module/footprint and power-protection details still needed before fabrication.
+
 ## Supported hardware and current status
 
 Target: a classic ESP32-WROOM development board with USB-to-serial programming, two standalone BIGTREETECH TMC2209 drivers, two NC switches, and one MG90S. The firmware compiles with PlatformIO espressif32 6.10.0 / Arduino-ESP32 2.0.17. It was flashed successfully on 2026-10-12 to the connected ESP32-D0WD-V3 (revision 3.1) through /dev/cu.usbserial-0001. Flash hashes verified and the board booted into Drawy-Setup-67b4fc with drawing locked. Physical motor/servo commissioning remains.

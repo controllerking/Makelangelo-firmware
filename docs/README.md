@@ -7,6 +7,7 @@
 | [Roadmap](IMPLEMENTATION_ROADMAP.md) | Safety-first implementation plan |
 | [Progress](PROGRESS.md) | Findings and current state |
 | [ESP32 wiring and setup](ESP32_WIRING_AND_SETUP.md) | WROOM pin map, power, upload, calibration, and commissioning |
+| [PCB hardware specification](PCB_HARDWARE_SPEC.md) | Component inventory, circuit/net definitions, power and protection, connectors, BOM and PCB release gates |
 | [Wireless control](WIRELESS_CONTROL.md) | Wi-Fi setup, protocol, disconnect recovery, and verification |
 | [Computer controller](../controller/README.md) | Browser UI, SVG preparation, job queue, and local startup |
 
