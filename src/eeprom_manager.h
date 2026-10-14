@@ -5,7 +5,11 @@
 // Please see http://www.github.com/MarginallyClever/makelangeloFirmware for more information.
 //------------------------------------------------------------------------------
 
-#define FIRMWARE_VERSION          11  // Increment when adding new variables
+#ifdef TARGET_ESP32
+#define FIRMWARE_VERSION          12  // ESP32 configuration starts uncalibrated.
+#else
+#define FIRMWARE_VERSION          11
+#endif
 #define SIZEOF_FLOAT_BYTES        (4)
 #define SIZEOF_LONG_BYTES         (4)
 #define EEPROM_VERSION            0  // 0..255 (1 byte)

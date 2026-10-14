@@ -84,6 +84,9 @@ class Parser {
 
   char serialBuffer[PARSER_BUFFER_LENGTH + 1];  // Serial buffer
   int sofar;                       // Serial buffer progress
+#ifdef TARGET_ESP32
+  bool inputOverflow = false;
+#endif
 
   char *currentCommand;
 

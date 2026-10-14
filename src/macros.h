@@ -369,6 +369,7 @@ FORCE_INLINE float WRAP_RADIANS(float n) {
 #define _ENA_1(O)           _ISENA(CAT(_IS,CAT(ENA_, O)))
 #define _DIS_1(O)           NOT(_ENA_1(O))
 #define ENABLED(V...)       DO(ENA,&&,V)
+#undef DISABLED
 #define DISABLED(V...)      DO(DIS,&&,V)
 #define COUNT_ENABLED(V...) DO(ENA,+,V)
 

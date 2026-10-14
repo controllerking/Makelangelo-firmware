@@ -12,7 +12,9 @@
 #include "tmc2130.h"
 
 #if NUM_SERVOS > 0
-#ifdef USE_ALT_SERVO
+#ifdef TARGET_ESP32
+#  include "boards/HAL/ESP32/servo.h"
+#elif defined(USE_ALT_SERVO)
 #  include "mservo.h"
 #else
 #  include <Servo.h>
@@ -276,6 +278,9 @@ public:
   static void home();
   static void engage();
   static void disengage();
+#ifdef TARGET_ESP32
+  static void abortMotion();
+#endif
   static void set_step_count(int32_t *a);
   static void setPenAngle(int arg0);
   static void clockISRProfile();
@@ -325,7 +330,7 @@ public:
 
 
     #ifdef CPU_32_BIT
-      timer = uint32_t(STEPPER_TIMER_RATE) / step_rate;
+      timer = uint32_t(STEPPER_TIMER_RATE) / _MAX(step_rate, 1UL);
     #else
       NOLESS(step_rate,CLOCK_MIN_STEP_FREQUENCY);
       step_rate -= CLOCK_MIN_STEP_FREQUENCY;

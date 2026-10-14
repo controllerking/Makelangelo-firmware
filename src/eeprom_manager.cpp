@@ -32,6 +32,9 @@ uint8_t EEPROMManager::writeLong(int ee, long value) {
 
   byte* p = (byte*)(void*)&value;
   for (uint16_t i = 0; i < sizeof(value); i++) EEPROM.write(ee++, *p++);
+#ifdef TARGET_ESP32
+  EEPROM.commit();
+#endif
 
   return 1;
 }
@@ -46,6 +49,9 @@ void EEPROMManager::saveUID() {
 }
 
 uint8_t EEPROMManager::loadUID() {
+#ifdef TARGET_ESP32
+  robot_uid = readLong(EEPROM_UUID);
+#endif
   return EEPROM.read(EEPROM_VERSION);
 }
 
@@ -190,6 +196,9 @@ void EEPROMManager::loadStepRate() {
 }
 
 void EEPROMManager::saveAll() {
+#ifdef TARGET_ESP32
+  saveCalibration();
+#endif
   saveUID();
   saveLimits();
   saveHome();
@@ -200,6 +209,14 @@ void EEPROMManager::saveAll() {
 
 void EEPROMManager::loadAll() {
   char versionNumber = loadVersion();
+#ifdef TARGET_ESP32
+  if (versionNumber != FIRMWARE_VERSION) {
+    EEPROM.write(EEPROM_VERSION, FIRMWARE_VERSION);
+    factory_reset();
+    EEPROM.commit();
+    return;
+  }
+#endif
   if (versionNumber != FIRMWARE_VERSION) {
     // If not the current FIRMWARE_VERSION or the FIRMWARE_VERSION is sullied (i.e. unknown data)
     // Update the version number
@@ -219,6 +236,24 @@ void EEPROMManager::loadAll() {
   loadSPU();
   loadJerk();
   loadStepRate();
+#ifdef TARGET_ESP32
+  bool valid = isfinite(calibrateLeft) && isfinite(calibrateRight) &&
+    calibrateLeft >= 0 && calibrateRight >= 0 &&
+    calibrateLeft <= 5000 && calibrateRight <= 5000;
+  for (int i = 0; i < NUM_AXIES; ++i)
+    valid = valid && isfinite(axies[i].limitMin) && isfinite(axies[i].limitMax) &&
+      axies[i].limitMin <= axies[i].limitMax &&
+      fabsf(axies[i].limitMin) <= 10000 && fabsf(axies[i].limitMax) <= 10000;
+  for (int i = 0; i < NUM_MUSCLES; ++i)
+    valid = valid && isfinite(motor_spu[i]) && motor_spu[i] > 0 && motor_spu[i] <= 10000 &&
+      isfinite(max_step_rate[i]) && max_step_rate[i] > 0 &&
+      isfinite(max_jerk[i]) && max_jerk[i] >= 0;
+  valid = valid && motor_spu[NUM_MOTORS] == 1;
+  if (!valid) {
+    SERIAL_ECHOLNPGM("Invalid stored settings; resetting to uncalibrated defaults.");
+    factory_reset();
+  }
+#endif
 }
 
 void EEPROMManager::reportAll() {

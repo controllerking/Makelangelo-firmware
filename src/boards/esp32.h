@@ -1,55 +1,33 @@
 #pragma once
-//------------------------------------------------------------------------------
-// Makelangelo - firmware for various robot kinematic models
-// dan@marginallycelver.com 2013-12-26
-// Please see http://www.github.com/MarginallyClever/makelangeloFirmware for more information.
-//------------------------------------------------------------------------------
-
-// https://www.instructables.com/id/Programming-the-ESP32-Using-Arduino-SoftwareIDE/
-
-// ESP32 D1 R2 board type should be set to "LOLIN(ESP32) R1 D2 & mini"
-// or WEMOS D1 ESP32 MINI
-
 #if MOTHERBOARD == BOARD_ESP32
-
-// wrong board type set
-#  ifndef ESP32
-#    error "Oops!  Make sure you have 'ESP32 D1 R1' selected from the 'Tools -> Boards' menu."
+#  include <sdkconfig.h>
+#  if !defined(ESP32) || !defined(TARGET_ESP32)
+#    error "Select an esp32-polargraph PlatformIO environment."
 #  endif
-
-#  define MAX_MOTORS (2)
-
-#  define MOTOR_0_LETTER           'X'
-#  define MOTOR_0_DIR_PIN          (15)
-#  define MOTOR_0_STEP_PIN         (13)
-#  define MOTOR_0_ENABLE_PIN       (12)
-#  define MOTOR_0_LIMIT_SWITCH_PIN () /* X min */
-
-#  define MOTOR_1_LETTER           'Y'
-#  define MOTOR_1_DIR_PIN          (0)
-#  define MOTOR_1_STEP_PIN         (4)
-#  define MOTOR_1_ENABLE_PIN       (5)
-#  define MOTOR_1_LIMIT_SWITCH_PIN () /* Y min */
-
-#  define CS_PIN_0 9
-#  define DIAG1_0  14
-
-#  define CS_PIN_1 10
-#  define DIAG1_1  16
-
-#  define MAX_BOARD_SERVOS (1)
-#  define SERVO0_PIN       (23) /* Servo 1 */
-
-#  define LIMIT_SWITCH_PIN_LEFT  (MOTOR_0_LIMIT_SWITCH_PIN)
-#  define LIMIT_SWITCH_PIN_RIGHT (MOTOR_1_LIMIT_SWITCH_PIN)
-
-#  define HAS_WIFI
-#  define WIFI_SSID_NAME ""  // WiFi AP SSID Name - define this in local_config.h
-#  define WIFI_SSID_PASS ""  // WiFi AP SSID Password - define this in local_config.h
-
+#  if !defined(CONFIG_IDF_TARGET_ESP32)
+#    error "This profile is for ESP32-WROOM (classic ESP32), not S2/S3/C3."
+#  endif
+#  include "esp32_config.h"
+#  define MAX_MOTORS 2
+#  define MAX_BOARD_SERVOS 1
+#  define MOTOR_0_LETTER 'X'
+#  define MOTOR_1_LETTER 'Y'
+#  define LIMIT_SWITCH_PIN_LEFT MOTOR_0_LIMIT_SWITCH_PIN
+#  define LIMIT_SWITCH_PIN_RIGHT MOTOR_1_LIMIT_SWITCH_PIN
+// NC to GND, pull-up to 3.3 V: actuated OR broken wire reads HIGH.
+#  define LIMIT_SWITCH_PRESSED_LEFT HIGH
+#  define LIMIT_SWITCH_PRESSED_RIGHT HIGH
+#  define MOTOR_ENABLE_OFF_0 HIGH
+#  define MOTOR_ENABLE_OFF_1 HIGH
+#  define START0 HIGH
+#  define START1 HIGH
+#  define END0 LOW
+#  define END1 LOW
+#  define DEFAULT_FEEDRATE 10.0f
+#  define DEFAULT_ACCELERATION 50.0f
+#  define UNITS_PER_STEP (PULLEY_PITCH / STEPS_PER_TURN)
+#  undef HAS_WIFI
 #  undef HAS_SD
 #  undef HAS_LCD
-
-#include "HAL_avr.h"
-
-#endif  // MOTHERBOARD == BOARD_ESP32
+#  include "HAL/ESP32/HAL.h"
+#endif

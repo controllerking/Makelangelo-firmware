@@ -8,6 +8,10 @@
 // INCLUDES
 //------------------------------------------------------------------------------
 #include "configure.h"
+#ifdef TARGET_ESP32
+#include "wall_polargraph.h"
+#include "wireless.h"
+#endif
 #include "sdcard.h"
 #include "lcd.h"
 
@@ -112,6 +116,9 @@ void setHome(float *pos) {
 }
 
 void meanwhile() {
+#ifdef TARGET_ESP32
+  wallService();
+#endif
   // robot specific meanwhile tasks
   robotMeanwhile();
 
@@ -195,6 +202,9 @@ void setup() {
 
   teleport(pos);
   setFeedRate(DEFAULT_FEEDRATE);
+#ifdef TARGET_ESP32
+  wirelessBegin();
+#endif
   robot_setup();
   // reportAllMotors();
 
@@ -218,6 +228,9 @@ void loop() {
   parser.update();
 
   parser.advance();
+#ifdef TARGET_ESP32
+  wirelessAdvance();
+#endif
   // The PC will wait forever for the ready signal.
   // if Arduino hasn't received a new instruction in a while, send ready() again
   // just in case USB garbled ready and each half is waiting on the other.

@@ -5,6 +5,9 @@
 //------------------------------------------------------------------------------
 
 #include "configure.h"
+#ifdef TARGET_ESP32
+#include "wall_polargraph.h"
+#endif
 
 //------------------------------------------------------------------------------
 // DEFINES
@@ -897,6 +900,12 @@ void itr();
 
 // set up the pins for each motor
 void Stepper::setup() {
+#ifdef TARGET_ESP32
+  if (!wallHardwareReady()) {
+    SERIAL_ECHOLNPGM("ESP32 pins missing/invalid; configure src/esp32_local.h.");
+    return;
+  }
+#endif
 #define SETUP_MOT(NN)                                    \
   motors[NN].letter           = MOTOR_##NN##_LETTER;     \
   motors[NN].step_pin         = MOTOR_##NN##_STEP_PIN;   \
@@ -908,11 +917,20 @@ void Stepper::setup() {
 
   for(ALL_MOTORS(i)) {
     // set the motor pin & scale
+#ifdef TARGET_ESP32
+    digitalWrite(motors[i].enable_pin, HIGH);
+    digitalWrite(motors[i].step_pin, LOW);
+    digitalWrite(motors[i].dir_pin, LOW);
+#endif
     pinMode(motors[i].step_pin, OUTPUT);
     pinMode(motors[i].dir_pin, OUTPUT);
     pinMode(motors[i].enable_pin, OUTPUT);
     // set the switch pin
+#ifdef TARGET_ESP32
+    pinMode(motors[i].limit_switch_pin, INPUT_PULLUP);
+#else
     pinMode(motors[i].limit_switch_pin, INPUT);
+#endif
     digitalWrite(motors[i].limit_switch_pin, HIGH);
 
 #ifdef HAS_TMC2130
@@ -931,6 +949,9 @@ void Stepper::setup() {
 #  ifdef ESP8266
   pinMode(SERVO0_PIN, OUTPUT);
 #  else
+#ifdef TARGET_ESP32
+  servos[0].write(PEN_UP_ANGLE);
+#endif
   servos[0].attach(SERVO0_PIN);
 #  endif  // ESP8266
 #endif
@@ -955,7 +976,16 @@ void Stepper::setup() {
   setDirections(0);
 
   HAL_timer_start(STEP_TIMER_NUM);
+#ifdef TARGET_ESP32
+  if (!HAL_timer_initialized(STEP_TIMER_NUM)) {
+    wallEmergencyStop();
+    SERIAL_ECHOLNPGM("FAULT: step timer allocation failed.");
+    return;
+  }
+  disengage();
+#else
   engage();
+#endif
 }
 
 
@@ -973,24 +1003,40 @@ void Stepper::set_step_count(int32_t *a) {
   ALL_MOTOR_MACRO(SETUP_STEP);
 
 #if NUM_SERVOS > 0
-  global_servoSteps_0 = 0;
+  global_servoSteps_0 = a[NUM_MOTORS];
 #endif
 }
 
 
 // turn on power to the motors (make them immobile)
 void Stepper::engage() {
+#ifdef TARGET_ESP32
+  if (!wallHardwareReady() || wallStopped()) return;
+#endif
 #define ENABLE_MOTOR(NN) digitalWrite(motors[NN].enable_pin, MOTOR_ENABLE_ON_##NN);
   ALL_MOTOR_MACRO(ENABLE_MOTOR);
 }
 
 // turn off power to the motors (make them move freely)
 void Stepper::disengage() {
+#ifdef TARGET_ESP32
+  if (!wallHardwareReady()) return;
+  wallInvalidatePosition();
+#endif
 #define DISABLE_MOTOR(NN) digitalWrite(motors[NN].enable_pin, MOTOR_ENABLE_OFF_##NN);
   ALL_MOTOR_MACRO(DISABLE_MOTOR);
 }
 
 // Change pen state.
+#ifdef TARGET_ESP32
+void Stepper::abortMotion() {
+  portENTER_CRITICAL(&stepperMux);
+  working_block = nullptr;
+  planner.estop();
+  portEXIT_CRITICAL(&stepperMux);
+}
+#endif
+
 void Stepper::setPenAngle(int arg0) {
 #if NUM_AXIES >= 3
   if(arg0 < axies[2].limitMin) arg0 = axies[2].limitMin;
@@ -1004,6 +1050,10 @@ void Stepper::setPenAngle(int arg0) {
   analogWrite(SERVO0_PIN, arg0);
 #else
   servos[0].write(arg0);
+#ifdef TARGET_ESP32
+  global_servoSteps_0 = arg0;
+  planner.blockBuffer[planner.getPrevBlock(planner.block_buffer_head)].a[NUM_MOTORS].step_count = arg0;
+#endif
 #endif  // ESP8266
 #endif    // NUM_SERVOS>0
 }
@@ -1057,6 +1107,7 @@ void Stepper::isrPulsePhase() {
 #endif
 
   bool stepNeeded[NUM_MUSCLES];
+  if (!stepsToDo) return;
 
   // move each axis
   do {
@@ -1082,6 +1133,9 @@ void Stepper::isrPulsePhase() {
 #endif
 
     ALL_MOTOR_MACRO(PULSE_START);
+#ifdef TARGET_ESP32
+    delayMicroseconds(2);
+#endif
     // now that the pins have had a moment to settle, do the second half of the steps.
     ALL_MOTOR_MACRO(PULSE_FINISH);
 
@@ -1270,6 +1324,15 @@ HAL_STEP_TIMER_ISR() {
 }
 
 void Stepper::isr() {
+#ifdef TARGET_ESP32
+  // Timer autoreloads to zero. Schedule from ISR entry and leave enough time
+  // after the work for the next pulse. Do not toggle global FreeRTOS IRQs.
+  portENTER_CRITICAL_ISR(&stepperMux);
+  isrPulsePhase();
+  const hal_timer_t interval = isrBlockPhase();
+  HAL_timer_set_compare(0, _MAX(interval, HAL_timer_get_count(0) + 20));
+  portEXIT_CRITICAL_ISR(&stepperMux);
+#else
   static hal_timer_t nextMainISR=0;
 
 #ifdef DEBUG_STEPPING
@@ -1351,6 +1414,7 @@ void Stepper::isr() {
   SERIAL_ECHOPAIR(" ",time3);
   SERIAL_ECHOLNPAIR(" ",time4);
 #endif
+#endif  // TARGET_ESP32
 }
 
 void Stepper::setDirections(uint16_t bits) {
@@ -1367,6 +1431,6 @@ void Stepper::setDirections(uint16_t bits) {
   ALL_MOTOR_MACRO(SET_STEP_DIR);
 
 #if NUM_SERVOS > 0
-  global_servoStep_dir_0 = (!!(working_block->dir&(1<<NUM_MOTORS))) ? -1 : 1;
+  global_servoStep_dir_0 = (!!(bits&(1<<NUM_MOTORS))) ? -1 : 1;
 #endif
 }

@@ -5,6 +5,10 @@
 //------------------------------------------------------------------------------
 
 #include "configure.h"
+#include "polargraph_math.h"
+#ifdef TARGET_ESP32
+#include "wall_polargraph.h"
+#endif
 
 #if MACHINE_STYLE == POLARGRAPH
 
@@ -18,16 +22,9 @@ void IK(const float *const cartesian, int32_t *motorStepArray) {
   float right = axies[0].limitMax;
   float top   = axies[1].limitMax;
 
-  float dy          = sq(cartesian[1] - top  );
-  float dx1         = sq(cartesian[0] - left );
-  float dx2         = sq(right - cartesian[0]);
-  motorStepArray[0] = lroundf(sqrtf(dx1 + dy));
-  motorStepArray[1] = lroundf(sqrtf(dx2 + dy));
-  motorStepArray[2] = cartesian[2];
-  
-  motorStepArray[0] *= motor_spu[0];
-  motorStepArray[1] *= motor_spu[1];
-  motorStepArray[2] *= motor_spu[2];
+  motorStepArray[0] = polargraphSteps(cartesian[0], cartesian[1], left, top, motor_spu[0]);
+  motorStepArray[1] = polargraphSteps(cartesian[0], cartesian[1], right, top, motor_spu[1]);
+  motorStepArray[2] = lroundf(cartesian[2] * motor_spu[2]);
 }
 
 /**
@@ -37,6 +34,14 @@ void IK(const float *const cartesian, int32_t *motorStepArray) {
  * @return 0 if no problem, 1 on failure.
  */
 int FK(int32_t *motorStepArray, float *cartesian) {
+#ifdef TARGET_ESP32
+  if (motor_spu[0] <= 0 || motor_spu[1] <= 0 || motor_spu[2] <= 0) return 1;
+  if (!polargraphPosition(axies[0].limitMin, axies[0].limitMax, axies[1].limitMax,
+       motorStepArray[0] / motor_spu[0], motorStepArray[1] / motor_spu[1],
+       cartesian[0], cartesian[1])) return 1;
+  cartesian[2] = motorStepArray[2] / motor_spu[2];
+  return 0;
+#else
   float left  = axies[0].limitMin;
   float right = axies[0].limitMax;
   float top   = axies[1].limitMax;
@@ -76,9 +81,14 @@ int FK(int32_t *motorStepArray, float *cartesian) {
   MYSERIAL1.print("C2=");      MYSERIAL1.println(cartesian[2]);
   */
   return 0;
+#endif
 }
 
 void recordHome() {
+#ifdef TARGET_ESP32
+  SERIAL_ECHOLNPGM("Use measured D7 L/R reference lengths, D9 to save, then G28.");
+  return;
+#else
 #  if defined(CAN_HOME)
   planner.wait_for_empty_segment_buffer();
   motor.engage();
@@ -183,6 +193,7 @@ void recordHome() {
   parser.M114();
   SERIAL_ECHOLNPGM("Done.");
 #  endif  // defined(CAN_HOME)
+#endif
 }
 
 void polargraph_homeAtSpeed(int delayTime) {
@@ -219,6 +230,9 @@ void polargraph_homeAtSpeed(int delayTime) {
  *  If limit switches are installed, move to touch each switch so that the pen holder can move to home position.
  */
 void robot_findHome() {
+#ifdef TARGET_ESP32
+  wallHome();
+#else
 #  if defined(CAN_HOME)
   // do not run this code unless you have the hardware to find home!
   planner.wait_for_empty_segment_buffer();
@@ -282,6 +296,7 @@ void robot_findHome() {
 
   SERIAL_ECHOLNPGM("Done.");
 #  endif  // defined(CAN_HOME)
+#endif
 }
 
 /**
@@ -459,6 +474,16 @@ inline void polargraphResetM33() {
  * M503 factory reset
  */
 void factory_reset() {
+#ifdef TARGET_ESP32
+  wallInvalidatePosition();
+  for (int i = 0; i < NUM_AXIES; ++i) {
+    axies[i].limitMin = axies[i].limitMax = axies[i].homePos = axies[i].pos = 0;
+  }
+  axies[2].limitMin = _MIN(PEN_UP_ANGLE, PEN_DOWN_ANGLE);
+  axies[2].limitMax = _MAX(PEN_UP_ANGLE, PEN_DOWN_ANGLE);
+  axies[2].pos = PEN_UP_ANGLE;
+  calibrateLeft = calibrateRight = 0;
+#endif
   motor_spu[0]=STEPS_PER_UNIT;
   motor_spu[1]=STEPS_PER_UNIT;
   motor_spu[2]=1;
@@ -475,13 +500,13 @@ void factory_reset() {
   max_jerk[NUM_MOTORS] = MAX_JERK_Z_DEFAULT;
 #endif
 
-#if MACHINE_HARDWARE_VERSION == MAKELANGELO_6
+#if MACHINE_HARDWARE_VERSION == MAKELANGELO_6 && !defined(TARGET_ESP32)
   polargraphResetM6();
 #endif
-#if MACHINE_HARDWARE_VERSION == MAKELANGELO_5
+#if MACHINE_HARDWARE_VERSION == MAKELANGELO_5 && !defined(TARGET_ESP32)
   polargraphResetM5();
 #endif
-#if MACHINE_HARDWARE_VERSION == MAKELANGELO_3_3
+#if MACHINE_HARDWARE_VERSION == MAKELANGELO_3_3 && !defined(TARGET_ESP32)
   polargraphResetM33();
 #endif
 
@@ -489,7 +514,12 @@ void factory_reset() {
 }
 
 // called once at startup
-void robot_setup() {}
+void robot_setup() {
+#ifdef TARGET_ESP32
+  if (WALL_AUTO_HOME && WALL_HOMING_CONFIRMED) wallHome();
+  else SERIAL_ECHOLNPGM("ESP32 ready for commissioning; drawing locked until G28.");
+#endif
+}
 
 
 #endif  // POLARGRAPH

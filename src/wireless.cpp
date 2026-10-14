@@ -1,0 +1,464 @@
+#include "configure.h"
+#ifdef TARGET_ESP32
+#include "wireless.h"
+#include "wall_polargraph.h"
+#include "wire_protocol.h"
+#include <WiFi.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <Preferences.h>
+#include <ESPmDNS.h>
+#include <ArduinoJson.h>
+#include <esp_system.h>
+#include <lwip/sockets.h>
+
+namespace {
+constexpr unsigned queueCapacity = 8;
+constexpr uint32_t heartbeatTimeout = 5000;
+Preferences prefs;
+WebServer portal(80);
+DNSServer dns;
+WiFiServer server(9999);
+WiFiClient client;
+String setupName, setupPassword, pairToken, portalNonce, bootId, session;
+String savedSsid[3], savedPassword[3];
+bool started = false, apActive = false, authenticated = false;
+bool socketAssigned = false;
+bool polling = false, dispatching = false, hold = false, paused = false;
+bool penSettling = false, restoring = false;
+int heldPen = PEN_UP_ANGLE;
+uint32_t lastSeen = 0, lastStatus = 0, joinStarted = 0, retryAt = 0, onlineSince = 0;
+uint32_t settleUntil = 0, lastDispatched = 0;
+bool joining = false, scanRunning = false;
+int attemptedNetwork = -1;
+uint32_t failedUntil[3] = {0, 0, 0};
+char line[384];
+size_t lineLength = 0;
+bool overflow = false;
+WireLedger ledger;
+struct Command {
+  uint32_t id;
+  char op[12];
+  float x, y, feed;
+  int angle;
+};
+Command queue[queueCapacity];
+unsigned head = 0, count = 0;
+String lastError;
+
+String randomHex(unsigned bytes) {
+  String out;
+  const char hex[] = "0123456789abcdef";
+  for (unsigned i = 0; i < bytes; ++i) {
+    uint8_t v = uint8_t(esp_random());
+    out += hex[v >> 4]; out += hex[v & 15];
+  }
+  return out;
+}
+bool idle() { return !planner.movesPlanned() && !dispatching && !wallIsHoming(); }
+void lostConnection();
+void writeJson(JsonDocument &doc) {
+  if (!client.connected()) return;
+  // WiFiClient::write can wait for seconds on a non-reading peer. Never let
+  // telemetry block motion service: a short/failed nonblocking write loses
+  // the link and enters the same drain/pen-up path as Wi-Fi loss.
+  char outgoing[1400];
+  if (doc.overflowed() || measureJson(doc) + 1 >= sizeof(outgoing)) {
+    lostConnection(); return;
+  }
+  size_t n = serializeJson(doc, outgoing, sizeof(outgoing) - 1);
+  outgoing[n++] = '\n';
+  if (send(client.fd(), outgoing, n, MSG_DONTWAIT) != int(n)) lostConnection();
+}
+void state(JsonObject out) {
+  out["boot"] = bootId;
+  out["session"] = session;
+  out["next"] = ledger.next;
+  out["accepted"] = ledger.next - 1;
+  out["completed"] = ledger.completed;
+  out["queue_free"] = queueCapacity - count;
+  out["planner_free"] = Planner::movesFree();
+  out["homed"] = wallPositionKnown();
+  out["reference"] = wallManualReference() ? "manual" : (wallPositionKnown() ? "switches" : "unknown");
+  out["fault"] = wallStopped();
+  out["paused"] = paused;
+  out["holding"] = hold;
+  out["busy"] = bool(count || planner.movesPlanned() || dispatching);
+  out["moving"] = bool(planner.movesPlanned() || dispatching || restoring || wallIsHoming());
+  out["homing"] = wallIsHoming();
+  out["x"] = axies[0].pos; out["y"] = axies[1].pos;
+  out["pen"] = servos[0].read();
+  out["pen_up"] = PEN_UP_ANGLE; out["pen_down"] = PEN_DOWN_ANGLE;
+  out["position_kind"] = planner.movesPlanned() ? "planned" : "settled";
+  JsonArray limits = out.createNestedArray("limits");
+  for (int i = 0; i < 2; ++i) {
+    JsonArray a = limits.createNestedArray();
+    a.add(axies[i].limitMin); a.add(axies[i].limitMax);
+  }
+  out["error"] = lastError;
+}
+void status(const char *type = "status") {
+  StaticJsonDocument<1024> doc;
+  doc["type"] = type;
+  state(doc.as<JsonObject>());
+  writeJson(doc);
+}
+void error(const char *message, uint32_t id = 0) {
+  StaticJsonDocument<256> doc;
+  doc["type"] = "error"; doc["error"] = message; doc["id"] = id;
+  doc["next"] = ledger.next;
+  writeJson(doc);
+}
+void requestHold() {
+  hold = true;
+  if (wallIsHoming()) wallEmergencyStop();
+}
+void lostConnection() {
+  if (authenticated && (count || planner.movesPlanned() || servos[0].read() != PEN_UP_ANGLE))
+    requestHold();
+  authenticated = false;
+  socketAssigned = false;
+  lineLength = 0; overflow = false;
+  client.stop();
+}
+void acknowledge(uint32_t id, bool duplicate) {
+  StaticJsonDocument<1024> doc;
+  doc["type"] = "ack"; doc["id"] = id; doc["duplicate"] = duplicate;
+  state(doc.as<JsonObject>()); writeJson(doc);
+}
+bool validSession(const String &s) {
+  if (s.length() != 36) return false;
+  for (unsigned i = 0; i < s.length(); ++i)
+    if (!isxdigit(s[i]) && s[i] != '-') return false;
+  return true;
+}
+void handleLine(const char *raw) {
+  StaticJsonDocument<512> doc;
+  if (deserializeJson(doc, raw)) { error("invalid_json"); return; }
+  const String type = doc["type"] | "";
+  if (type == "hello") {
+    const String candidate = doc["session"] | "";
+    if (String(doc["token"] | "") != pairToken || !validSession(candidate)) {
+      error("unauthorized"); client.stop(); return;
+    }
+    if (session.length() && session != candidate &&
+        (count || planner.movesPlanned() || hold || ledger.completed != ledger.next - 1)) {
+      error("session_busy"); client.stop(); return;
+    }
+    if (session != candidate) {
+      session = candidate; ledger.reset(); lastDispatched = 0;
+    }
+    authenticated = true; lastSeen = millis(); status("hello"); return;
+  }
+  if (!authenticated) { error("hello_required"); client.stop(); return; }
+  lastSeen = millis();
+  if (type == "ping" || type == "status") { status(); return; }
+  if (type == "pause" || type == "resume" || type == "stop") {
+    if (type == "pause") requestHold();
+    if (type == "stop") {
+      wallEmergencyStop(); count = 0; penSettling = restoring = false;
+      hold = true; paused = true; lastError = "emergency_stop";
+    }
+    if (type == "resume") {
+      if (String(doc["boot"] | "") != bootId || wallStopped() || !wallPositionKnown() ||
+          !paused || !idle()) { error("resume_not_safe"); return; }
+      // Restore contact at the exact retained position before continuing paths.
+      motor.setPenAngle(heldPen); servos[0].update();
+      restoring = true; settleUntil = millis() + 300;
+      hold = false; paused = false;
+    }
+    StaticJsonDocument<1024> reply;
+    reply["type"] = "control"; reply["request"] = doc["request"] | "";
+    reply["op"] = type; state(reply.as<JsonObject>()); writeJson(reply); return;
+  }
+  if (type != "command") { error("unknown_type"); return; }
+  if (String(doc["boot"] | "") != bootId) { error("boot_changed"); return; }
+  if (!doc["id"].is<uint32_t>()) { error("invalid_id"); return; }
+  const uint32_t id = doc["id"];
+  const uint32_t hash = WireLedger::fingerprint(raw);
+  auto decision = ledger.inspect(id, hash);
+  if (decision == WireLedger::Duplicate) { acknowledge(id, true); return; }
+  if (decision != WireLedger::New) {
+    error(decision == WireLedger::Conflict ? "id_conflict" :
+      decision == WireLedger::Stale ? "stale_id" : "out_of_order", id); return;
+  }
+  if (wallStopped()) { error("fault", id); return; }
+  if (hold || paused) { error("paused", id); return; }
+  if (count == queueCapacity) { error("queue_full", id); return; }
+  Command cmd = {};
+  cmd.id = id;
+  const String op = doc["op"] | "";
+  if (op == "move") {
+    if (!doc["x"].is<float>() || !doc["y"].is<float>() || !doc["feed"].is<float>()) {
+      error("invalid_move", id); return;
+    }
+    cmd.x = doc["x"]; cmd.y = doc["y"]; cmd.feed = doc["feed"];
+    float target[NUM_AXIES] = {cmd.x, cmd.y, float(PEN_UP_ANGLE)};
+    if (!isfinite(cmd.feed) || cmd.feed < 0.1f || cmd.feed > 30 ||
+        !wallMoveAllowed(target)) { error("invalid_move_or_unhomed", id); return; }
+  } else if (op == "pen") {
+    if (!doc["angle"].is<int>()) { error("invalid_pen", id); return; }
+    cmd.angle = doc["angle"];
+    if (cmd.angle < axies[2].limitMin || cmd.angle > axies[2].limitMax ||
+        (cmd.angle != PEN_UP_ANGLE && !wallPositionKnown())) { error("invalid_pen", id); return; }
+  } else if (op != "home" && op != "sync") { error("unknown_operation", id); return; }
+  op.toCharArray(cmd.op, sizeof(cmd.op));
+  queue[(head + count) % queueCapacity] = cmd; ++count;
+  ledger.accept(hash); acknowledge(id, false);
+}
+void beginSetup() {
+  if (apActive) return;
+  WiFi.mode(WIFI_AP_STA);
+  apActive = WiFi.softAP(setupName.c_str(), setupPassword.c_str());
+  if (apActive) {
+    dns.start(53, "*", WiFi.softAPIP());
+    SERIAL_ECHOLNPGM("Wi-Fi setup network:");
+    MYSERIAL1.println(setupName.c_str());
+    SERIAL_ECHOLNPGM("Setup WPA2 password (generated on this device):");
+    MYSERIAL1.println(setupPassword.c_str());
+    SERIAL_ECHOLNPGM("Open http://192.168.4.1");
+  }
+}
+bool setupClient() {
+  return apActive && portal.client().localIP() == WiFi.softAPIP();
+}
+void portalReply(int code, const String &body, const char *mime = "application/json") {
+  portal.sendHeader("Cache-Control", "no-store");
+  portal.send(code, mime, body);
+}
+const char setupPage[] PROGMEM = R"HTML(<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Drawy Wi-Fi setup</title><style>body{font:17px system-ui;background:#f5f1e9;color:#263f35;max-width:560px;margin:40px auto;padding:24px}input,button{font:inherit;padding:12px;box-sizing:border-box;width:100%;margin:8px 0}button{background:#263f35;color:white;border:0;border-radius:8px}pre{white-space:pre-wrap;overflow-wrap:anywhere}label{display:block;margin-top:18px}</style><h1>Connect your drawing robot</h1><p>Select a 2.4 GHz network or enter a hidden network name. Your password is saved on the robot.</p><form id="setup"><label>Network name<input id="ssid" list="networks" maxlength="32" required autocomplete="off"></label><datalist id="networks"></datalist><label>Network password<input id="password" type="password" maxlength="63" autocomplete="new-password"></label><button>Save and connect</button></form><pre id="result"></pre><h2>Pair your computer</h2><p>Copy this device key into the computer controller. It is separate from your Wi-Fi password.</p><pre id="key"></pre><script>let nonce='';async function info(){let d=await(await fetch('/info')).json();nonce=d.nonce;document.querySelector('#key').textContent=d.token;document.querySelector('#result').textContent=d.connected?'Connected: '+d.ip+' (drawy.local), TCP 9999':'Waiting for a known network';}async function scan(){let d=await(await fetch('/scan')).json();let list=document.querySelector('#networks');list.replaceChildren(...d.networks.map(n=>{let o=document.createElement('option');o.value=n;return o}));}document.querySelector('#setup').onsubmit=async e=>{e.preventDefault();let r=await fetch('/networks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nonce,ssid:document.querySelector('#ssid').value,password:document.querySelector('#password').value})});document.querySelector('#password').value='';document.querySelector('#result').textContent=await r.text()};info();scan();setInterval(info,3000);setInterval(scan,10000)</script></html>)HTML";
+void setupRoutes() {
+  portal.on("/", HTTP_GET, [] {
+    if (!setupClient()) { portalReply(403, "{}"); return; }
+    portalReply(200, FPSTR(setupPage), "text/html");
+  });
+  portal.on("/info", HTTP_GET, [] {
+    if (!setupClient()) { portalReply(403, "{}"); return; }
+    StaticJsonDocument<512> d;
+    d["nonce"] = portalNonce; d["token"] = pairToken;
+    d["connected"] = WiFi.status() == WL_CONNECTED;
+    d["ip"] = WiFi.localIP().toString();
+    String out; serializeJson(d, out); portalReply(200, out);
+  });
+  portal.on("/scan", HTTP_GET, [] {
+    if (!setupClient()) { portalReply(403, "{}"); return; }
+    StaticJsonDocument<1536> d;
+    JsonArray networks = d.createNestedArray("networks");
+    int n = WiFi.scanComplete();
+    if (n >= 0) {
+      for (int i = 0; i < n && i < 24; ++i) networks.add(WiFi.SSID(i));
+    }
+    String out; serializeJson(d, out); portalReply(200, out);
+    if (n != WIFI_SCAN_RUNNING && !joining) {
+      WiFi.scanDelete(); WiFi.scanNetworks(true); scanRunning = true;
+    }
+  });
+  portal.on("/networks", HTTP_POST, [] {
+    if (!setupClient()) { portalReply(403, "{}"); return; }
+    StaticJsonDocument<512> d;
+    if (portal.arg("plain").length() > 384 || deserializeJson(d, portal.arg("plain")) ||
+        String(d["nonce"] | "") != portalNonce) { portalReply(400, "Invalid setup request"); return; }
+    String ssid = d["ssid"] | "", password = d["password"] | "";
+    if (!ssid.length() || ssid.length() > 32 || password.length() > 63 ||
+        (password.length() && password.length() < 8)) {
+      portalReply(400, "Use a network name and an 8–63 character password, or blank for an open network."); return;
+    }
+    // Move this network to the front, retaining up to two other known networks.
+    int existing = -1;
+    for (int i = 0; i < 3; ++i) if (savedSsid[i] == ssid) existing = i;
+    if (existing < 0) existing = 2;
+    for (int i = existing; i > 0; --i) {
+      savedSsid[i] = savedSsid[i-1]; savedPassword[i] = savedPassword[i-1];
+    }
+    savedSsid[0] = ssid; savedPassword[0] = password;
+    for (auto &deadline : failedUntil) deadline = 0;
+    for (int i = 0; i < 3; ++i) {
+      prefs.putString(("ssid" + String(i)).c_str(), savedSsid[i]);
+      prefs.putString(("pass" + String(i)).c_str(), savedPassword[i]);
+    }
+    WiFi.disconnect(false, false);
+    WiFi.begin(ssid.c_str(), password.c_str());
+    attemptedNetwork = 0;
+    joining = true; joinStarted = millis(); retryAt = millis() + 30000;
+    portalReply(200, "Saved. Connecting; this page will show the address when ready.");
+  });
+  portal.onNotFound([] {
+    if (!setupClient()) { portalReply(403, "{}"); return; }
+    portal.sendHeader("Location", "http://192.168.4.1/");
+    portalReply(302, "");
+  });
+  portal.begin();
+}
+void networkMaintenance() {
+  const uint32_t now = millis();
+  if (WiFi.status() == WL_CONNECTED) {
+    joining = false;
+    if (!onlineSince) {
+      onlineSince = now;
+      MYSERIAL1.print("Wi-Fi connected: "); MYSERIAL1.println(WiFi.localIP().toString().c_str());
+      MDNS.end();
+      MDNS.begin("drawy");
+      MDNS.addService("drawy", "tcp", 9999);
+    }
+    if (apActive && uint32_t(now - onlineSince) > 60000) {
+      dns.stop(); WiFi.softAPdisconnect(true); apActive = false; WiFi.mode(WIFI_STA);
+    }
+  } else {
+    onlineSince = 0;
+    if (joining && uint32_t(now - joinStarted) > 15000) {
+      if (attemptedNetwork >= 0) failedUntil[attemptedNetwork] = now + 60000;
+      joining = false; beginSetup();
+    }
+    if (!joining && int32_t(now - retryAt) >= 0) {
+      int results = WiFi.scanComplete();
+      if (results == WIFI_SCAN_RUNNING) { scanRunning = true; return; }
+      if (!scanRunning) { WiFi.scanNetworks(true); scanRunning = true; return; }
+      scanRunning = false;
+      int best = -1, strength = -1000;
+      for (int i = 0; i < results; ++i)
+        for (int j = 0; j < 3; ++j)
+          if (savedSsid[j].length() && int32_t(now - failedUntil[j]) >= 0 &&
+              savedSsid[j] == WiFi.SSID(i) && WiFi.RSSI(i) > strength) {
+            best = j; strength = WiFi.RSSI(i);
+          }
+      // Also try the first saved network (it may have a hidden SSID).
+      if (best < 0)
+        for (int j = 0; j < 3; ++j)
+          if (savedSsid[j].length() && int32_t(now - failedUntil[j]) >= 0) { best = j; break; }
+      if (best >= 0) {
+        WiFi.begin(savedSsid[best].c_str(), savedPassword[best].c_str());
+        attemptedNetwork = best;
+        joining = true; joinStarted = now;
+      }
+      retryAt = now + 30000;
+      beginSetup();
+    }
+  }
+  // Provisioning HTTP may block on slow clients: serve only when motion is idle.
+  if (apActive && idle() && !count && !authenticated) {
+    dns.processNextRequest(); portal.handleClient();
+  }
+}
+}
+void wirelessBegin() {
+  if (started) return;
+  started = true;
+  WiFi.persistent(false); WiFi.setHostname("drawy"); WiFi.mode(WIFI_STA); WiFi.setSleep(false);
+  bootId = randomHex(8); portalNonce = randomHex(16);
+  prefs.begin("drawy-wifi", false);
+  setupPassword = prefs.getString("setup-pass", "");
+  pairToken = prefs.getString("pair-key", "");
+  if (!setupPassword.length()) { setupPassword = randomHex(8); prefs.putString("setup-pass", setupPassword); }
+  if (!pairToken.length()) { pairToken = randomHex(16); prefs.putString("pair-key", pairToken); }
+  setupName = "Drawy-Setup-" + String(uint32_t(ESP.getEfuseMac()) & 0xffffff, HEX);
+  for (int i = 0; i < 3; ++i) {
+    savedSsid[i] = prefs.getString(("ssid" + String(i)).c_str(), "");
+    savedPassword[i] = prefs.getString(("pass" + String(i)).c_str(), "");
+  }
+  setupRoutes(); server.begin(); server.setNoDelay(true);
+  if (savedSsid[0].length()) {
+    WiFi.begin(savedSsid[0].c_str(), savedPassword[0].c_str());
+    attemptedNetwork = 0;
+    joining = true; joinStarted = millis(); retryAt = millis() + 30000;
+  } else beginSetup();
+}
+bool wirelessOwnsMotion() { return authenticated || count || hold; }
+bool wirelessHoldMotion() { return hold; }
+bool wirelessSetupRequested(const char *raw) {
+  if (strcmp(raw, "WIFI SETUP")) return false;
+  if (!idle() || count) { SERIAL_ECHOLNPGM("Finish/pause the job before Wi-Fi setup."); return true; }
+  beginSetup();
+  // Also repeat details when setup was already advertising before USB opened.
+  MYSERIAL1.println(setupName.c_str());
+  MYSERIAL1.println(setupPassword.c_str());
+  SERIAL_ECHOLNPGM("Open http://192.168.4.1");
+  onlineSince = millis(); // Keep setup visible for a full minute if already connected.
+  return true;
+}
+void wirelessPoll() {
+  if (!started || polling) return;
+  polling = true;
+  networkMaintenance();
+  if (socketAssigned && (!client.connected() ||
+      (authenticated && WiFi.status() != WL_CONNECTED && client.localIP() != WiFi.softAPIP())))
+    lostConnection();
+  if (!socketAssigned) {
+    WiFiClient incoming = server.available();
+    if (incoming) {
+      client = incoming; client.setNoDelay(true);
+      socketAssigned = true;
+      lastSeen = millis(); authenticated = false; lineLength = 0; overflow = false;
+    }
+  } else {
+    WiFiClient extra = server.available();
+    if (extra) extra.stop();
+  }
+  unsigned budget = 512;
+  while (client.connected() && client.available() && budget--) {
+    const char c = client.read();
+    if (c == '\r') continue;
+    if (c == '\n') {
+      line[lineLength] = 0;
+      if (overflow) error("line_too_long");
+      else if (lineLength) handleLine(line);
+      lineLength = 0; overflow = false;
+    } else if (lineLength < sizeof(line) - 1) line[lineLength++] = c;
+    else overflow = true;
+  }
+  if (client.connected() && uint32_t(millis() - lastSeen) > heartbeatTimeout) lostConnection();
+  if (authenticated && uint32_t(millis() - lastStatus) > 250) {
+    lastStatus = millis(); status();
+  }
+  polling = false;
+}
+void wirelessAdvance() {
+  if (!started || dispatching) return;
+  if (wallStopped()) {
+    count = 0; hold = paused = true; penSettling = restoring = false; return;
+  }
+  if (!planner.movesPlanned()) ledger.finish(lastDispatched);
+  if (hold) {
+    if (!planner.movesPlanned() && !paused) {
+      heldPen = servos[0].read();
+      motor.setPenAngle(PEN_UP_ANGLE); servos[0].update();
+      paused = true; penSettling = restoring = false;
+      status();
+    }
+    return;
+  }
+  if (restoring) {
+    if (int32_t(millis() - settleUntil) < 0) return;
+    restoring = false;
+  }
+  if (!count) return;
+  Command &cmd = queue[head];
+  if (penSettling) {
+    if (int32_t(millis() - settleUntil) < 0) return;
+    penSettling = false;
+  } else if (!strcmp(cmd.op, "pen")) {
+    if (planner.movesPlanned()) return;
+    motor.setPenAngle(cmd.angle); servos[0].update();
+    penSettling = true; settleUntil = millis() + 300; return;
+  } else if (!strcmp(cmd.op, "sync")) {
+    if (planner.movesPlanned()) return;
+  } else if (!strcmp(cmd.op, "home")) {
+    if (planner.movesPlanned()) return;
+    dispatching = true;
+    const bool ok = wallHome();
+    dispatching = false;
+    if (!ok) { lastError = "home_failed"; requestHold(); return; }
+  } else if (!strcmp(cmd.op, "move")) {
+    if (!wallPositionKnown()) { lastError = "position_unknown"; requestHold(); return; }
+    float target[NUM_AXIES] = {cmd.x, cmd.y, axies[2].pos};
+    dispatching = true;
+    planner.bufferLine(target, cmd.feed);
+    dispatching = false;
+    if (wallStopped() || !count) return;
+    if (hold && (fabsf(axies[0].pos - cmd.x) > 0.001f || fabsf(axies[1].pos - cmd.y) > 0.001f))
+      return; // Retain the unplanned remainder for explicit same-boot resume.
+  }
+  lastDispatched = cmd.id;
+  head = (head + 1) % queueCapacity; --count;
+  if (!planner.movesPlanned()) ledger.finish(lastDispatched);
+}
+#endif

@@ -1,9 +1,28 @@
 #include "configure.h"
 #include "lcd.h"
 #include "sdcard.h"
+#ifdef TARGET_ESP32
+#include "wall_polargraph.h"
+#include "wireless.h"
+
+static bool isEmergencyLine(const char *line) {
+  while (*line == ' ') ++line;
+  if (*line == 'N' || *line == 'n') {
+    ++line;
+    while (NUMERIC(*line)) ++line;
+    while (*line == ' ') ++line;
+  }
+  if (*line != 'M' && *line != 'm') return false;
+  char *end;
+  const long code = strtol(line + 1, &end, 10);
+  return code == 112 && (*end == 0 || *end == ' ' || *end == '*' || *end == ';');
+}
+#endif
 
 #if NUM_SERVOS > 0
-#ifdef USE_ALT_SERVO
+#ifdef TARGET_ESP32
+# include "boards/HAL/ESP32/servo.h"
+#elif defined(USE_ALT_SERVO)
 # include "mservo.h"
 # else
 #  include <Servo.h>
@@ -145,7 +164,7 @@ char Parser::checkLineNumberAndCRCisOK() {
   // next time around, wait for the next line number.
   lineNumber++;
   // remove checksum
-  serialBuffer[i] = 0;
+  if (found != -1) serialBuffer[found] = 0;
 
   return 1;  // ok!
 }
@@ -164,8 +183,32 @@ void Parser::update() {
   if(MYSERIAL1.available() > 0) {
     char c = MYSERIAL1.read();
     // MYSERIAL1.print(c);
+#ifdef TARGET_ESP32
+    if (c != '\r' && c != '\n') {
+      if (sofar < PARSER_BUFFER_LENGTH) serialBuffer[sofar++] = c;
+      else inputOverflow = true;
+    }
+#else
     if(sofar < PARSER_BUFFER_LENGTH) serialBuffer[sofar++] = c;
+#endif
     if(c == '\r' || c == '\n') {
+#ifdef TARGET_ESP32
+      serialBuffer[sofar] = 0;
+      if (isEmergencyLine(serialBuffer)) {
+        wallEmergencyStop();
+        SERIAL_ECHOLNPGM("ESTOP: reset required.");
+      } else if (wirelessSetupRequested(serialBuffer)) {
+        // Handled locally; never put credentials in the G-code queue.
+      } else if (inputOverflow) {
+        SERIAL_ECHOLNPGM("Command rejected: line too long.");
+      } else if (wallIsHoming()) {
+        SERIAL_ECHOLNPGM("Busy homing; only M112 accepted.");
+      } else if (checkLineNumberAndCRCisOK()) {
+        if (!ringBuffer.add(serialBuffer))
+          SERIAL_ECHOLNPGM("Command rejected: queue full; wait for ready.");
+      }
+      inputOverflow = false;
+#else
       serialBuffer[sofar - 1] = 0;
 
       if(checkLineNumberAndCRCisOK()) {
@@ -176,6 +219,7 @@ void Parser::update() {
 
         ringBuffer.waitToAdd(serialBuffer);
       }
+#endif
       // clear input buffer
       sofar = 0;
       // go again
@@ -246,6 +290,14 @@ void Parser::processCommand() {
   }
 
   char c = toupper(*currentCommand);
+#ifdef TARGET_ESP32
+  if (wirelessOwnsMotion() && !(c == 'M' &&
+      (parseInt(currentCommand + 1) == 112 || parseInt(currentCommand + 1) == 114 ||
+       parseInt(currentCommand + 1) == 100 || parseInt(currentCommand + 1) == 503))) {
+    SERIAL_ECHOLNPGM("USB command blocked: wireless controller owns motion.");
+    return;
+  }
+#endif
 
   int16_t cmd;
 
@@ -260,6 +312,20 @@ void Parser::processCommand() {
   // M codes
   if(c=='M') {
     cmd = parseInt(currentCommand+1);
+#ifdef TARGET_ESP32
+    if (wallStopped() && cmd != 100 && cmd != 114 && cmd != 503 && cmd != 112) return;
+    if (cmd != 112) planner.wait_for_empty_segment_buffer();
+    if (wallStopped() && cmd != 100 && cmd != 114 && cmd != 503 && cmd != 112) return;
+    if (cmd == 42 || cmd == 226) {
+      SERIAL_ECHOLNPGM("Raw GPIO commands disabled on wall machine.");
+      return;
+    }
+    if (cmd == 500 && wallManualReference()) {
+      SERIAL_ECHOLNPGM("M500 blocked: temporary manual geometry must not be saved.");
+      return;
+    }
+    if (cmd == 92 || cmd == 101 || cmd == 501 || cmd == 502) wallInvalidatePosition();
+#endif
     switch (cmd) {
       case   6:        M6();          break;
       case  17:        M17();         break;
@@ -274,6 +340,14 @@ void Parser::processCommand() {
       case 110:        M110();        break;
       case 112:        M112();        break;
       case 114:        M114();        break;
+#ifdef TARGET_ESP32
+      case 665:
+        if (parseInt('C', 0) != 1 ||
+            !wallSetManualReference(parseFloat('W', NAN), parseFloat('L', NAN), parseFloat('R', NAN), parseFloat('S', 10)))
+          SERIAL_ECHOLNPGM("Manual reference rejected. Use M665 W<spacing> L<left> R<right> S<1..80> C1 in mm, idle USB only.");
+        M114();
+        break;
+#endif
 #ifdef HAS_LCD
       case 117:        M117();        break;
 #endif
@@ -298,6 +372,12 @@ void Parser::processCommand() {
   // machine style-specific codes
   if(c=='D') {
     cmd = parseInt(currentCommand+1);
+#ifdef TARGET_ESP32
+    if (wallStopped()) return;
+    planner.wait_for_empty_segment_buffer();
+    if (wallStopped()) return;
+    if (cmd == 6 || cmd == 7 || cmd == 9) wallInvalidatePosition();
+#endif
     if(cmd!=-1) {
       switch (cmd) {
         case 0:        D0();        break;
@@ -366,6 +446,30 @@ void Parser::processCommand() {
    I don't know why the latter motor names are UVWT.
 */
 void Parser::D0() {
+#ifdef TARGET_ESP32
+  if (!wallHardwareReady() || wallStopped()) return;
+  wallInvalidatePosition();
+  motor.engage();
+  for (int i = 0; i < NUM_MOTORS; ++i) {
+    const int amount = parseInt(motors[i].letter, 0);
+    if (abs(amount) > 3200) {
+      SERIAL_ECHOLNPGM("D0 rejected: maximum 3200 steps per axis.");
+      return;
+    }
+    digitalWrite(motors[i].dir_pin, amount < 0 ? HIGH : LOW);
+    for (int j = 0; j < abs(amount); ++j) {
+      meanwhile();
+      if (wallStopped()) return;
+      delayMicroseconds(2);
+      digitalWrite(motors[i].step_pin, HIGH);
+      delayMicroseconds(2);
+      digitalWrite(motors[i].step_pin, LOW);
+      delayMicroseconds(WALL_HOMING_INTERVAL_US);
+    }
+  }
+  motor.setDirections(0);
+  return;
+#else
   int j, amount;
 
   motor.engage();
@@ -404,6 +508,7 @@ void Parser::D0() {
       SERIAL_EOL();
     }
   }
+#endif
 }
 
 /**
@@ -439,6 +544,13 @@ void Parser::D6() {
 */
 void Parser::D7() {
   SERIAL_ECHOPGM("D7");
+#ifdef TARGET_ESP32
+  const float l = parseFloat('L', calibrateLeft), r = parseFloat('R', calibrateRight);
+  if (!isfinite(l) || !isfinite(r) || l <= 0 || r <= 0 || l > 5000 || r > 5000) {
+    SERIAL_ECHOLNPGM("Invalid reference lengths; use measured millimetres.");
+    return;
+  }
+#endif
   calibrateLeft  = parseFloat('L', calibrateLeft);
   calibrateRight = parseFloat('R', calibrateRight);
   SERIAL_ECHOLNPAIR_P(" L",calibrateLeft," R",calibrateRight);
@@ -709,6 +821,11 @@ void Parser::G04() {
    Teleport mental position
 */
 void Parser::G92() {
+#ifdef TARGET_ESP32
+  wallInvalidatePosition();
+  SERIAL_ECHOLNPGM("G92 invalidates physical position; use G28 before drawing.");
+  return;
+#endif
   Planner::wait_for_empty_segment_buffer();
   SERIAL_ECHOPGM("G92");
   int i;
@@ -758,11 +875,13 @@ void Parser::M18() {
    default pin is LED_BUILTIN.  default state is LOW
 */
 void Parser::M42() {
+#ifndef TARGET_ESP32
   Planner::wait_for_empty_segment_buffer();
   SERIAL_ECHOPGM("M42");
   int pin      = parseInt('P', LED_BUILTIN);
   int newState = parseInt('S', 0);
   digitalWrite(pin, newState ? HIGH : LOW);
+#endif
 }
 
 /**
@@ -771,6 +890,11 @@ void Parser::M42() {
 void Parser::M92() {
   SERIAL_ECHOPGM("M92 ");
   for(ALL_MUSCLES(i)) {
+#ifdef TARGET_ESP32
+    float value = parseFloat(motors[i].letter, motor_spu[i]);
+    if (!isfinite(value) || value <= 0 || value > 10000) return;
+    if (i == NUM_MOTORS && value != 1) return;
+#endif
     motor_spu[i] = parseFloat(motors[i].letter, motor_spu[i]);
     SERIAL_CHAR(motors[i].letter);
     SERIAL_ECHO_F(motor_spu[i]);
@@ -823,6 +947,14 @@ void Parser::M101() {
   if(axisNumber >= 0 && axisNumber < NUM_AXIES) {
     float newT      = parseFloat('T', axies[axisNumber].limitMax);
     float newB      = parseFloat('B', axies[axisNumber].limitMin);
+#ifdef TARGET_ESP32
+    if (!isfinite(newT) || !isfinite(newB) || newT <= newB ||
+        fabsf(newT) > 10000 || fabsf(newB) > 10000) {
+      SERIAL_ECHOLNPGM("Invalid limits: require finite T > B.");
+      return;
+    }
+    if (axisNumber == 2 && (newB < 0 || newT > 180)) return;
+#endif
     uint8_t changed = 0;
 
     if(!equalEpsilon(axies[axisNumber].limitMax, newT)) {
@@ -862,6 +994,10 @@ void Parser::M110() {
  * Emergency stop
  */
 void Parser::M112() {
+#ifdef TARGET_ESP32
+  wallEmergencyStop();
+  return;
+#endif
   planner.estop();
 #ifdef HAS_LCD
   LCD_setStatusMessage("ESTOP - PLEASE RESET");
@@ -890,6 +1026,15 @@ void Parser::M114() {
   SERIAL_ECHOPAIR_F(" A",desiredAcceleration);
 
   SERIAL_EOL();
+#ifdef TARGET_ESP32
+  SERIAL_ECHOPAIR("Position ", wallManualReference() ? "MANUAL" : (wallPositionKnown() ? "HOMED" : "UNKNOWN"));
+  SERIAL_ECHOPAIR(" Stop ", wallStopped() ? "LATCHED" : "CLEAR");
+  if (wallHardwareReady()) {
+    SERIAL_ECHOPAIR(" Switch L ", digitalRead(LIMIT_SWITCH_PIN_LEFT));
+    SERIAL_ECHOPAIR(" R ", digitalRead(LIMIT_SWITCH_PIN_RIGHT));
+  }
+  SERIAL_EOL();
+#endif
 }
 
 #ifdef HAS_LCD
@@ -933,6 +1078,11 @@ void Parser::M117() {
 void Parser::M203() {
   SERIAL_ECHOPGM("M203 ");
   for(ALL_MUSCLES(i)) {
+#ifdef TARGET_ESP32
+    const float v = parseFloat(motors[i].letter, max_step_rate[i]);
+    const float limit = i < NUM_MOTORS ? MAX_FEEDRATE * motor_spu[i] : MAX_FEEDRATE_Z;
+    if (!isfinite(v) || v <= 0 || v > limit) return;
+#endif
     max_step_rate[i] = parseFloat(motors[i].letter, max_step_rate[i]);
     SERIAL_CHAR(motors[i].letter);
     SERIAL_ECHO_F(max_step_rate[i]);
@@ -1040,9 +1190,19 @@ void Parser::M280() {
 
   if(id <0 || id>=NUM_SERVOS) return;
   if(v>=0 && v <=180) {
+#ifdef TARGET_ESP32
+    motor.setPenAngle(v);
+#else
     servos[id].write(v);
+#endif
   } else if(v>500) {
     servos[id].writeMicroseconds(v);
+#ifdef TARGET_ESP32
+    axies[2].pos = servos[id].read();
+    float pos[NUM_AXIES];
+    for (int i = 0; i < NUM_AXIES; ++i) pos[i] = axies[i].pos;
+    teleport(pos);
+#endif
   }
 #endif
 }

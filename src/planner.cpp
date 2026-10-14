@@ -3,6 +3,11 @@
 #include "configure.h"
 #include "lcd.h"
 #include "motor.h"
+#ifdef TARGET_ESP32
+#include "wall_polargraph.h"
+#include "polargraph_math.h"
+#include "wireless.h"
+#endif
 
 extern Planner planner;
 
@@ -486,7 +491,11 @@ float atan3(float dy, float dx) {
 
 
 void Planner::wait_for_empty_segment_buffer() {
-  while (block_buffer_tail != block_buffer_head);
+  while (block_buffer_tail != block_buffer_head) {
+#ifdef TARGET_ESP32
+    meanwhile();
+#endif
+  }
 }
 
 
@@ -964,8 +973,14 @@ void Planner::segmentReport(Segment &new_seg) {
    @input longest_distance must be >=0
 */
 void Planner::addSegment(const float *const target_position, float fr_units_s, float longest_distance) {
+#ifdef TARGET_ESP32
+  if (wallStopped() || wirelessHoldMotion()) return;
+#endif
   uint8_t next_buffer_head;
   Segment *newBlock = getNextFreeBlock(next_buffer_head);
+#ifdef TARGET_ESP32
+  if (wallStopped() || wirelessHoldMotion()) return;
+#endif
 
   if(!populateBlock(newBlock,target_position,fr_units_s,longest_distance)) return;
 
@@ -990,6 +1005,12 @@ void Planner::addSegment(const float *const target_position, float fr_units_s, f
    @input new_feed_rate speed to travel along arc
 */
 void Planner::bufferLine(float *pos, float new_feed_rate_units) {
+#ifdef TARGET_ESP32
+  if (!wallMoveAllowed(pos) || !isfinite(new_feed_rate_units) || new_feed_rate_units <= 0) return;
+  new_feed_rate_units = _MIN(new_feed_rate_units, MAX_FEEDRATE);
+  if (wallManualReference()) new_feed_rate_units = _MIN(new_feed_rate_units, 2.0f);
+  motor.engage();
+#endif
   // Remember the feed rate.  This value will be used whenever no feedrate is given in a command, so it MUST be saved
   // BEFORE the dial adjustment. otherwise the feedrate will slowly fall or climb as new commands are processed.
   desiredFeedRate = new_feed_rate_units;
@@ -1025,9 +1046,8 @@ void Planner::bufferLine(float *pos, float new_feed_rate_units) {
 #define MIN_SEGMENT_LENGTH 0.5f
 #endif
   const float seconds = totalDistance / new_feed_rate_units;
-  int16_t segments   = seconds * SEGMENTS_PER_SECOND;
-  segments = _MIN(segments, totalDistance / MIN_SEGMENT_LENGTH);
-  segments = _MAX(segments, 1);
+  const float segmentCount = _MIN(seconds * SEGMENTS_PER_SECOND, totalDistance / MIN_SEGMENT_LENGTH);
+  int16_t segments = int16_t(_MAX(1.0f, _MIN(segmentCount, 32760.0f)));
 
 #ifdef HAS_GRIPPER
   // if we have a gripper and only gripper is moving, don't split the movement.
@@ -1047,6 +1067,9 @@ void Planner::bufferLine(float *pos, float new_feed_rate_units) {
 
   uint32_t until = millis() + 200UL;
   while (--segments) {
+#ifdef TARGET_ESP32
+    if (wallStopped() || wirelessHoldMotion()) return;
+#endif
     if(millis()>until) {
       meanwhile();
       until = millis() + 200UL;
@@ -1071,6 +1094,12 @@ void Planner::bufferLine(float *pos, float new_feed_rate_units) {
    @input new_feed_rate speed to travel along arc
 */
 void Planner::bufferArc(float cx, float cy, float *destination, char clockwise, float new_feed_rate_units) {
+#ifdef TARGET_ESP32
+  if (!wallMoveAllowed(destination) || !isfinite(cx) || !isfinite(cy) ||
+      !isfinite(new_feed_rate_units) || new_feed_rate_units <= 0) return;
+  new_feed_rate_units = _MIN(new_feed_rate_units, MAX_FEEDRATE);
+  if (wallManualReference()) new_feed_rate_units = _MIN(new_feed_rate_units, 2.0f);
+#endif
   // get radius
   float dx = axies[0].pos - cx;
   float dy = axies[1].pos - cy;
@@ -1087,6 +1116,24 @@ void Planner::bufferArc(float cx, float cy, float *destination, char clockwise, 
   else if(clockwise == ARC_CCW && da > 0)
     sa += 2 * PI;
   da       = ea - sa;
+#ifdef TARGET_ESP32
+  er = hypotf(destination[0] - cx, destination[1] - cy);
+  if (!isfinite(sr) || !isfinite(er) || sr <= 0 || fabsf(er - sr) > 0.05f) {
+    SERIAL_ECHOLNPGM("Arc rejected: inconsistent radius.");
+    return;
+  }
+  da = polargraphArcSweep(atan3(dy, dx),
+    atan3(destination[1] - cy, destination[0] - cx), clockwise == ARC_CW);
+  sa = atan3(dy, dx);
+  // Preflight every possible X/Y extremum before queuing any part of the arc.
+  for (int i = 0; i < 4; ++i) {
+    const float angle = i * PI / 2;
+    if (!polargraphAngleInArc(angle, sa, da)) continue;
+    float extreme[NUM_AXIES] = { cx + cosf(angle)*sr, cy + sinf(angle)*sr, destination[2] };
+    if (!wallMoveAllowed(extreme)) return;
+  }
+  er = sr;
+#endif
   float dr = er - sr;
 
   // get length of arc
@@ -1097,9 +1144,8 @@ void Planner::bufferArc(float cx, float cy, float *destination, char clockwise, 
   float totalDistance  = sqrtf(len1 * len1 + dr * dr);  // mm
 
   const float seconds = totalDistance / new_feed_rate_units;
-  int16_t segments   = seconds * SEGMENTS_PER_SECOND;
-  segments = _MIN(segments, totalDistance / MIN_SEGMENT_LENGTH);
-  segments = _MAX(segments, 1);
+  const float segmentCount = _MIN(seconds * SEGMENTS_PER_SECOND, totalDistance / MIN_SEGMENT_LENGTH);
+  int16_t segments = int16_t(_MAX(1.0f, _MIN(segmentCount, 32760.0f)));
 
   float n[NUM_AXIES], scale;
   float a, r;
@@ -1109,6 +1155,9 @@ void Planner::bufferArc(float cx, float cy, float *destination, char clockwise, 
 #endif
 
   for(int16_t i = 0; i <= segments; ++i) {
+#ifdef TARGET_ESP32
+    if (wallStopped()) return;
+#endif
     // interpolate around the arc
     scale = ((float)i) / ((float)segments);
 
@@ -1123,6 +1172,9 @@ void Planner::bufferArc(float cx, float cy, float *destination, char clockwise, 
     // send it to the planner
     bufferLine(n, new_feed_rate_units);
   }
+#ifdef TARGET_ESP32
+  bufferLine(destination, new_feed_rate_units);
+#endif
 }
 
 void Planner::estop() {
