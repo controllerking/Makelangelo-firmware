@@ -20,9 +20,12 @@ The firmware uses the pinned Arduino-ESP32 Wi-Fi, WebServer, DNSServer, Preferen
 4. Join that setup network from a computer/phone. Open http://192.168.4.1 if the captive page does not appear.
 5. Select/enter your 2.4 GHz SSID and password. The ESP32 saves up to three known networks in its NVS flash, tries the new network, and displays its IP when connected.
 6. Copy the device pairing key shown on that page. This generated key authorizes the computer controller and is separate from the Wi-Fi password.
-7. Rejoin your normal LAN, run the computer controller, and enter drawy.local or the numeric IP plus that pairing key.
+7. Rejoin your normal LAN. Put the fixed hostname/IP, port 9999 and pairing key
+   in the computer controller's private `.env` file (see
+   [controller setup](../controller/README.md)), then start it. The server links
+   automatically; linking is not editable through the web UI.
 
-While idle, sending WIFI SETUP over USB advertises setup and repeats the setup credentials. Disconnect the computer controller before using the portal. Setup HTTP is served only while motion is idle and no controller is authenticated, so a slow setup-page client cannot stall a drawing.
+While idle, sending WIFI SETUP over USB advertises setup and repeats the setup credentials. Stop the computer controller service before using the portal so its automatic reconnect cannot reclaim the device. Setup HTTP is served only while motion is idle and no controller is authenticated, so a slow setup-page client cannot stall a drawing.
 
 After station connection, setup remains available for about 60 seconds, then closes. When saved networks disappear, setup reappears and the robot periodically retries known networks; failed networks cool down so another saved network can be tried. Hidden SSIDs may be entered manually.
 

@@ -4,7 +4,7 @@
 <body>
 <header><a class="brand" href="/">drawy<span>drawing studio</span></a><div id="connection-badge" class="badge">Not connected</div></header>
 <main>
-<section class="intro"><p class="eyebrow">A little machinery. A lot of possibility.</p><h1>Make your next<br><em>mark.</em></h1><p>Prepare a drawing here. Let the wall do the rest.</p></section>
+<section class="intro"><h1>Make your next<br><em>mark.</em></h1></section>
 <section class="studio">
 <div class="preview-panel">
 <div class="panel-heading"><div><p class="eyebrow">THE DRAWING BOARD</p><h2 id="drawing-title">Your next drawing</h2></div><span id="paper-label" class="subtle">18 × 24 in</span></div>
@@ -14,11 +14,9 @@
 </div>
 <aside>
 <section class="card"><div class="panel-heading"><h2>Your robot</h2><span id="machine-state" class="subtle">Offline</span></div>
-<form id="connection-form"><label>Robot address<input id="host" placeholder="drawy.local" value="drawy.local" required autocomplete="off"></label><label>Pairing key<input id="token" type="password" placeholder="From the robot’s setup page" autocomplete="off"></label><button id="connect" class="button primary">Connect</button></form>
-<p class="help">First time? Join the robot’s <strong>Drawy-Setup</strong> Wi-Fi and open <strong>192.168.4.1</strong>. Its setup password appears on USB serial.</p>
+<p id="connection-message" class="help" role="status">Connecting automatically</p>
 <div class="machine-readout"><div><small>Position</small><span id="position">—</span></div><div><small>Pen</small><span id="pen-state">—</span></div></div>
 <div class="button-row"><button id="home" class="button secondary">Home</button><button id="pen-up" class="button secondary">Pen up</button><button id="pen-down" class="button secondary">Pen down</button></div>
-<button id="disconnect" class="text-button">Disconnect robot</button>
 </section>
 <section class="card"><h2>Prepare your paper</h2><form id="art-form">
 <label class="file-picker">Upload artwork<input id="svg-file" type="file" accept=".svg,.png,.jpg,.jpeg,.webp,image/svg+xml,image/png,image/jpeg,image/webp"></label><p id="file-name" class="help">PNG, JPG, WebP or SVG. Converted locally—never uploaded to a cloud service.</p>

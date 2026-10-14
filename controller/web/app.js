@@ -33,7 +33,7 @@ function render() {
   $('prepare').textContent=preparing?'Converting…':'Convert & preview';
   $('position').textContent=connected && Number.isFinite(d.x)?d.x.toFixed(1)+', '+d.y.toFixed(1)+' mm'+(d.position_kind==='planned'?' · target':''):'—';
   $('pen-state').textContent=connected?(d.pen===d.pen_up?'Up':d.pen+'°'):'—';
-  if (document.activeElement!==$('host')) $('host').value=snapshot.host || 'drawy.local';
+  $('connection-message').textContent=snapshot.connection_message || (connected?'Linked by server configuration':'Connecting automatically');
   if ($('paper').options.length===1 && snapshot.papers) {
     $('paper').replaceChildren(...Object.keys(snapshot.papers).map(name=>{
       const option=document.createElement('option');option.value=name;option.textContent=name+(name.startsWith('A')?'':' in');return option;
@@ -41,7 +41,6 @@ function render() {
   }
   for (const id of ['home','pen-up','pen-down']) $(id).disabled=!connected || !!active || !!d.fault || !!d.paused;
   $('pen-down').disabled ||= !d.homed;
-  $('connect').disabled=connected; $('disconnect').disabled=!connected;
   $('start').disabled=!connected || !d.homed || !!d.fault || !!active || !selected || !$('reviewed').checked || !!d.paused;
   $('pause').disabled=!connected || !active || active.state!=='running';
   $('resume').disabled=!connected || (active ? active.state!=='paused' : !!d.busy) || !d.paused || !!d.moving || !!d.fault || !d.homed;
@@ -134,10 +133,6 @@ function draw() {
     ctx.stroke();
   }
 }
-$('connection-form').onsubmit=e=>{e.preventDefault();act(async()=>{
-  await api('connect',{host:$('host').value,token:$('token').value});$('token').value='';toast('Robot connected.');
-});};
-$('disconnect').onclick=()=>act(()=>api('disconnect',{}));
 $('home').onclick=()=>act(async()=>{toast('Homing. Keep the carriage path clear.');await api('manual',{op:'home'});});
 $('pen-up').onclick=()=>act(()=>api('manual',{op:'pen_up'}));
 $('pen-down').onclick=()=>act(()=>api('manual',{op:'pen_down'}));

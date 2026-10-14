@@ -7,6 +7,9 @@ import {readFile} from 'node:fs/promises';
 export async function runWebTests() {
   const code=await readFile(new URL('../controller/web/app.js',import.meta.url),'utf8');
   const html=await readFile(new URL('../controller/web/index.html',import.meta.url),'utf8');
+  for(const removed of ['A little machinery. A lot of possibility.','Prepare a drawing here. Let the wall do the rest.',
+    'id="connection-form"','id="host"','id="token"','id="connect"','id="disconnect"'])assert(!html.includes(removed));
+  assert(!code.includes("api('connect'"));assert(!code.includes("api('disconnect'"));
   const elements=new Map(), calls=[], draws=[];
   let closed=0;
   const ctx=new Proxy({

@@ -45,6 +45,9 @@ local_config.h
 esp32_local.h
 controller/data/
 controller/demo-data/
+.env
+.env.*
+!.env.example
 
 ### PlatformIO ###
 .pioenvs

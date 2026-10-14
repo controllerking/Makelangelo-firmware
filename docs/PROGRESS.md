@@ -1,5 +1,19 @@
 # Development Progress Log
 
+## 2026-10-13 — fixed server-side robot linking
+
+- Removed the two requested introductory sentences and the browser address/key
+  form, connect/disconnect controls and corresponding linking API endpoints.
+- Robot host/port/pairing key now come from a private ignored `.env` (or startup
+  environment overrides). Configuration is immutable for the process lifetime;
+  no runtime discovery, browser override, or legacy credential fallback.
+- Server automatically links/retries the configured robot, without homing,
+  starting or resuming motion. Status remains visible without linking details.
+- Populated local configuration from the existing connection, with mode 0600;
+  kept the session UUID but removed credentials from the old runtime journal.
+- All 29 Python tests and isolated JavaScript UI checks pass. Live page/API
+  verified; robot unavailable at final check and retrying. No motion commanded.
+
 ## 2026-10-12 — Connected board flashed
 
 - Identified the USB CP2102 board as ESP32-D0WD-V3 revision 3.1, with a 40 MHz crystal.

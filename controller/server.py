@@ -15,6 +15,7 @@ import uuid
 from .artwork import PAPER, demo_paths, prepare, svg_paths, finite
 from .transport import DeviceLink, DeviceError
 from .raster import PRESETS, preset, raster_paths
+from .config import ENV_FILE, RobotConfig, load_robot_config
 
 ROOT = Path(__file__).parent
 MAX_BODY = 2_500_000
@@ -31,11 +32,16 @@ def save_json(path, data):
     os.chmod(path, 0o600)
 
 class Controller:
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, robot=None):
         self.data_dir = Path(data_dir)
         config_path = self.data_dir/"connection.json"
-        self.config = json.loads(config_path.read_text()) if config_path.exists() else {
-            "session":str(uuid.uuid4()), "host":"drawy.local", "port":9999, "token":""}
+        saved = json.loads(config_path.read_text()) if config_path.exists() else {}
+        self.config = {"session":saved.get("session", str(uuid.uuid4()))}
+        self.robot = robot or RobotConfig()
+        # Retain session identity for safe recovery, but remove legacy credentials.
+        # Host/port/key are never loaded from or written to this runtime journal.
+        if saved and set(saved) != {"session"}: save_json(config_path, self.config)
+        self.connection_message = "Connecting automatically"
         self.link = DeviceLink(self.config["session"], self.disconnected)
         self.jobs = {}
         if (self.data_dir/"jobs").exists():
@@ -61,6 +67,7 @@ class Controller:
                       {k:v for k,v in job.items() if k not in ("commands","paths")})
 
     def disconnected(self, reason):
+        self.connection_message = "Reconnecting automatically"
         if self.active and self.active in self.jobs:
             job = self.jobs[self.active]
             if job["state"] == "running":
@@ -81,20 +88,17 @@ class Controller:
                     min(job["command_count"], max(0, state.get("completed",0)-job["base_id"]+1)))
         return {"connected":self.link.connected, "device":dict(state),
                 "simulation":self.simulation,
-                "host":self.config["host"], "port":self.config["port"], "active":self.active,
+                "connection_message":self.connection_message, "active":self.active,
                 "jobs":[self.public_job(j) for j in sorted(self.jobs.values(), key=lambda j:j["created"], reverse=True)],
                 "papers":PAPER, "presets":PRESETS}
 
-    async def connect(self, data):
-        host = str(data.get("host") or self.config["host"]).strip()
-        port = int(data.get("port", self.config.get("port",9999)))
-        token = str(data.get("token") or self.config["token"]).strip()
-        if not host or not 1 <= port <= 65535 or not token:
-            raise ValueError("Enter the robot address and pairing key from its setup page")
+    async def connect(self):
+        if not self.robot.host or not self.robot.token:
+            raise ValueError("Robot connection must be configured in the server .env file")
         if self.worker and not self.worker.done():
             raise ValueError("Pause the current job before reconnecting")
-        state = await self.link.connect(host, token, port)
-        self.config.update(host=host, port=port, token=token)
+        state = await self.link.connect(self.robot.host, self.robot.token, self.robot.port)
+        self.connection_message = "Linked by server configuration"
         save_json(self.data_dir/"connection.json", self.config)
         if self.active:
             job = self.jobs[self.active]
@@ -103,6 +107,16 @@ class Controller:
                 job["message"] = "Robot rebooted. Rehome and explicitly restart; automatic resume is blocked."
                 self.persist(job); self.active = None
         return self.snapshot()
+
+    async def maintain_connection(self, retry_seconds=3):
+        # Reconnect only to the immutable startup configuration. Never home,
+        # start or resume motion here, including after a device reboot.
+        while True:
+            if not self.link.connected:
+                try: await self.connect()
+                except (OSError, ValueError, DeviceError, ConnectionError, asyncio.TimeoutError):
+                    self.connection_message = "Robot unavailable; retrying automatically"
+            await asyncio.sleep(retry_seconds)
 
     def build_artwork(self, data, device):
         if not isinstance(data, dict): raise ValueError("Expected an artwork object")
@@ -146,7 +160,7 @@ class Controller:
             return self.public_job(job, True)
 
     def validate_job(self, job):
-        if not self.link.connected: raise ValueError("Connect to the robot first")
+        if not self.link.connected: raise ValueError("Robot is offline; check the server configuration and network")
         d = self.link.state
         if not d.get("homed"): raise ValueError("Home the calibrated robot first")
         if d.get("fault"): raise ValueError("Reset the robot and rehome after a fault")
@@ -348,8 +362,6 @@ class HttpServer:
 
     async def api(self, path, data):
         c = self.controller
-        if path == "/api/connect": return await c.connect(data)
-        if path == "/api/disconnect": await c.link.close(); return c.snapshot()
         if path == "/api/import": return await c.import_async(data)
         if path == "/api/start": return await c.start(data["id"], data.get("reviewed",False))
         if path == "/api/pause": return await c.pause()
@@ -359,13 +371,15 @@ class HttpServer:
         raise ValueError("Unknown API endpoint")
 
 async def serve(args):
-    controller = Controller(args.data)
     simulator = None
     if args.simulate:
         from .simulator import SimulatedRobot
         simulator = await SimulatedRobot(secrets.token_hex(16)).start()
-        controller.simulation = True
-        await controller.connect({"host":"127.0.0.1","port":simulator.port,"token":simulator.token})
+        robot = RobotConfig("127.0.0.1", simulator.port, simulator.token)
+    else:
+        robot = load_robot_config(args.env_file)
+    controller = Controller(args.data, robot)
+    controller.simulation = bool(simulator)
     http = HttpServer(controller)
     server = await asyncio.start_server(http.handle, args.bind, args.port, limit=32768)
     address = server.sockets[0].getsockname()
@@ -373,9 +387,12 @@ async def serve(args):
     print(f"Drawy controller: http://{host}:{address[1]}/?access={http.key}", flush=True)
     if args.bind == "0.0.0.0":
         print("For your phone, replace 127.0.0.1 with this computer's LAN IP. Keep the access link private.", flush=True)
+    connection_task = asyncio.create_task(controller.maintain_connection())
     try:
         async with server: await server.serve_forever()
     finally:
+        connection_task.cancel()
+        await asyncio.gather(connection_task, return_exceptions=True)
         await controller.close()
         if simulator: await simulator.close()
 
@@ -385,6 +402,7 @@ def main():
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--data", type=Path, default=None)
     parser.add_argument("--simulate", action="store_true", help="Use a hardware-free robot simulator")
+    parser.add_argument("--env-file", type=Path, default=ENV_FILE, help="Fixed robot connection configuration; read only at startup")
     args = parser.parse_args()
     if args.data is None:
         args.data = Path("controller/demo-data" if args.simulate else "controller/data")
@@ -392,5 +410,7 @@ def main():
         asyncio.run(serve(args))
     except KeyboardInterrupt:
         print("Drawy controller stopped.")
+    except ValueError as exc:
+        parser.error(str(exc))
 
 if __name__ == "__main__": main()

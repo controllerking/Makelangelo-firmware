@@ -11,6 +11,7 @@ from controller.artwork import path_data, prepare, svg_paths, transform, point
 from controller.server import Controller, HttpServer
 from controller.simulator import SimulatedRobot
 from controller.transport import DeviceLink, DeviceError
+from controller.config import RobotConfig
 
 SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><path d="M0 0 L100 0 L100 100 L0 100 Z"/></svg>'
 OPTIONS = {"paper":"A4","left":100,"top":-100,"margin":20,"feed":10}
@@ -61,8 +62,9 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.robot = await SimulatedRobot(delay=.03).start()
-        self.controller = Controller(Path(self.temp.name))
-        await self.controller.connect({"host":"127.0.0.1","port":self.robot.port,"token":self.robot.token})
+        self.robot_config = RobotConfig("127.0.0.1", self.robot.port, self.robot.token)
+        self.controller = Controller(Path(self.temp.name), self.robot_config)
+        await self.controller.connect()
 
     async def asyncTearDown(self):
         await self.controller.close()
@@ -104,7 +106,7 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
         await until(lambda:self.controller.jobs[job["id"]]["state"]=="paused")
         await until(lambda:self.robot.paused)
         self.assertEqual(self.robot.pen,90)
-        await self.controller.connect({})
+        await self.controller.connect()
         self.assertEqual(self.controller.jobs[job["id"]]["state"],"paused")
         await self.controller.resume()
         await until(lambda:self.controller.jobs[job["id"]]["state"]=="completed",8)
@@ -132,7 +134,7 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.robot.reboot()
         await until(lambda:not self.controller.link.connected)
         await asyncio.sleep(.05)
-        await self.controller.connect({})
+        await self.controller.connect()
         self.assertEqual(self.controller.jobs[job["id"]]["state"],"interrupted")
         with self.assertRaises(ValueError): await self.controller.resume()
         with self.assertRaises(ValueError): await self.controller.start(job["id"],True)
@@ -191,9 +193,9 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
         await until(lambda:len(self.robot.queue)>=3)
         await self.controller.close()
         await until(lambda:self.robot.paused)
-        restored=Controller(Path(self.temp.name))
+        restored=Controller(Path(self.temp.name), self.robot_config)
         self.controller=restored
-        await restored.connect({})
+        await restored.connect()
         self.assertEqual(restored.active,job["id"])
         await restored.resume()
         await until(lambda:restored.jobs[job["id"]]["state"]=="completed",8)
@@ -204,7 +206,7 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.controller.manual("pen_down")
         await self.controller.link.close()
         await until(lambda:self.robot.paused)
-        await self.controller.connect({})
+        await self.controller.connect()
         await self.controller.resume()
         self.assertFalse(self.robot.hold)
 
@@ -225,6 +227,16 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
         try:
             code,_=await request("/",authorized=False);self.assertEqual(code,403)
             code,body=await request("/");self.assertEqual(code,200);self.assertIn(b"Drawing studio",body)
+            for removed in (b'connection-form',b'id="host"',b'id="token"',b'A little machinery.',b'Prepare a drawing here.'):
+                self.assertNotIn(removed,body)
+            for endpoint in ("connect","disconnect"):
+                code,_=await request("/api/"+endpoint,"POST",{"host":"different.local","token":"bad"})
+                self.assertEqual(code,400)
+            self.assertTrue(self.controller.link.connected)
+            code,body=await request("/api/status")
+            status=json.loads(body)
+            self.assertNotIn("host",status);self.assertNotIn("port",status)
+            self.assertNotIn(self.robot.token,body.decode())
             code,body=await request("/api/import","POST",{"svg":SVG,"options":OPTIONS})
             self.assertEqual(code,200)
             job=json.loads(body);self.assertTrue(job["paths"])
