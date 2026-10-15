@@ -16,6 +16,8 @@ class SimulatedRobot:
         self.homed, self.fault, self.hold, self.paused = False, False, False, False
         self.x, self.y, self.pen = 400., -200., 90
         self.held_pen = 90
+        self.pen_up,self.pen_down=90,40
+        self.pen_calibrated=self.pen_tuning=False
         self.writer = None
         self.authenticated = False
         self.drop_next_ack = False
@@ -26,6 +28,12 @@ class SimulatedRobot:
         self.last_seen = time.monotonic()
         self.heartbeat_timeout = 5
         self.error = ""
+        self.calibrating=False
+        self.jog_steps=[0,0]
+        self.reference="unknown"
+        self.calibration_id=""
+        self.draw_bounds=None
+        self.limits=[[0,1000],[-1200,0]]
 
     async def start(self, port=0):
         self.server = await asyncio.start_server(self.handle, "127.0.0.1", port)
@@ -39,7 +47,11 @@ class SimulatedRobot:
                 "planner_free":15,"homed":self.homed,"fault":self.fault,"paused":self.paused,
                 "holding":self.hold,"busy":bool(self.queue or self.active_command),
                 "moving":bool(self.active_command),"homing":False,"x":self.x,"y":self.y,
-                "pen":self.pen,"pen_up":90,"pen_down":40,"limits":[[0,1000],[-1200,0]],
+                "pen":self.pen,"pen_up":self.pen_up,"pen_down":self.pen_down,"limits":self.limits,
+                "pen_calibration_api":1,"pen_calibrated":self.pen_calibrated,"pen_tuning":self.pen_tuning,
+                "calibration_api":1,"switch_homing_enabled":True,"calibrating":self.calibrating,"jog_steps":list(self.jog_steps),
+                "steps_per_mm":[80.,80.],"reference":self.reference,"calibration_id":self.calibration_id,
+                "draw_bounds":self.draw_bounds,
                 "position_kind":"planned" if self.active_command else "settled","error":self.error}
 
     async def emit(self, message, writer=None):
@@ -51,8 +63,10 @@ class SimulatedRobot:
             except (OSError, ConnectionError): pass
 
     def lose(self):
-        if self.authenticated and (self.queue or self.active_command or self.pen != 90):
+        if self.authenticated and (self.queue or self.active_command or self.calibrating or self.pen_tuning or self.pen != self.pen_up):
             self.hold = True
+            self.calibrating=False
+            self.pen_tuning=False
         self.authenticated = False
         if self.writer: self.writer.close()
 
@@ -82,14 +96,15 @@ class SimulatedRobot:
                 if kind in ("ping","status"):
                     await self.emit(self.state()); continue
                 if kind in ("pause","resume","stop"):
-                    if kind == "pause": self.hold = True
+                    if kind == "pause": self.hold = True; self.calibrating=False
                     if kind == "resume":
                         if message.get("boot") != self.boot or not self.paused or self.active_command or not self.homed or self.fault:
                             await self.emit({"type":"error","error":"resume_not_safe"}); continue
                         self.hold = self.paused = False; self.pen = self.held_pen
                     if kind == "stop":
                         self.fault = True; self.homed = False; self.hold = self.paused = True
-                        self.queue.clear(); self.active_command = None; self.pen = 90
+                        self.queue.clear(); self.active_command = None; self.pen = self.pen_up;self.pen_tuning=False
+                        self.calibrating=False;self.reference="unknown";self.calibration_id=""
                     await self.emit(dict(self.state("control"),request=message.get("request",""),op=kind)); continue
                 number = message.get("id",0)
                 fail = None
@@ -102,14 +117,27 @@ class SimulatedRobot:
                         await self.emit(dict(self.state("ack"),id=number,duplicate=True)); continue
                 elif number != self.next: fail = "out_of_order"
                 elif self.fault: fail = "fault"
-                elif self.hold: fail = "paused"
+                elif self.hold and message.get("op") not in ("cal_begin","cal_apply","cal_pen","pen_config","pen_end"): fail = "paused"
                 elif len(self.queue) >= 8: fail = "queue_full"
+                elif self.pen_tuning and message.get("op") not in ("cal_pen","pen_config","pen_end","sync","pen"):fail="pen_calibration_active"
                 elif message.get("op") == "move" and not self.homed: fail = "invalid_move_or_unhomed"
+                elif message.get("op") in ("cal_pen","pen_config","pen_end"):
+                    if self.queue or self.active_command or self.calibrating:fail="calibration_busy"
+                    elif message.get("confirm") is not True:fail="confirmation_required"
+                    elif message["op"]=="cal_pen" and (type(message.get("angle")) is not int or not 10<=message["angle"]<=170):fail="invalid_pen"
+                    elif message["op"]=="pen_config" and (any(type(message.get(k)) is not int or not 10<=message[k]<=170 for k in ("up","down")) or message["up"]==message["down"]):fail="invalid_pen"
+                elif message.get("op") in ("cal_begin","cal_jog","cal_apply"):
+                    if self.queue or self.active_command:fail="calibration_busy"
+                    elif message["op"] in ("cal_begin","cal_apply") and message.get("confirm") is not True:fail="confirmation_required"
+                    elif message["op"]=="cal_jog" and (not self.calibrating or type(message.get("axis")) is not int or
+                            message["axis"] not in (0,1) or type(message.get("steps")) is not int or not 1<=abs(message["steps"])<=4000):fail="invalid_jog"
+                elif self.calibrating and message.get("op") not in ("sync","pen"):fail="calibration_active"
                 if fail:
                     await self.emit({"type":"error","error":fail,"id":number,"next":self.next}); continue
                 self.receipts[number] = fingerprint
                 if number-32 in self.receipts: del self.receipts[number-32]
                 self.next += 1; self.queue.append(message)
+                if message.get("op") in ("cal_begin","cal_apply","cal_pen","pen_config","pen_end"):self.hold=self.paused=False
                 if self.drop_next_ack:
                     self.drop_next_ack = False; self.lose(); break
                 if self.suppress_next_ack:
@@ -132,13 +160,29 @@ class SimulatedRobot:
                     self.x = (self.x+self.active_command["x"])/2
                     self.y = (self.y+self.active_command["y"])/2
                 self.active_command = None
-                self.held_pen = self.pen; self.pen = 90; self.paused = True
+                self.held_pen = self.pen; self.pen = self.pen_up; self.paused = True
             elif not self.hold and not self.fault:
                 if self.active_command and now >= self.busy_until:
                     command = self.active_command
                     if command["op"] == "move": self.x,self.y = command["x"],command["y"]
                     elif command["op"] == "pen": self.pen = command["angle"]
-                    elif command["op"] == "home": self.homed = True
+                    elif command["op"] == "cal_pen":self.pen=command["angle"];self.pen_tuning=True
+                    elif command["op"] == "pen_config":
+                        self.pen_up,self.pen_down=command["up"],command["down"]
+                        self.pen_calibrated=True;self.pen_tuning=False;self.pen=self.pen_up
+                    elif command["op"] == "pen_end":self.pen_tuning=False;self.pen=self.pen_up
+                    elif command["op"] == "home": self.homed = True;self.reference="switches"
+                    elif command["op"] == "cal_begin":
+                        self.homed=False;self.reference="unknown";self.calibration_id=""
+                        self.calibrating=True;self.jog_steps=[0,0];self.pen=self.pen_up;self.error=""
+                    elif command["op"] == "cal_jog":self.jog_steps[command["axis"]]+=command["steps"]
+                    elif command["op"] == "cal_apply":
+                        from .calibration import position
+                        self.x,self.y=position(command["width"],command["l"],command["r"])
+                        self.draw_bounds=[command[k] for k in ("xmin","ymin","xmax","ymax")]
+                        self.limits=[[0,command["width"]],[command["ymin"],0]]
+                        self.calibrating=False;self.homed=True;self.reference="user";self.calibration_id=command["cal_id"]
+                        self.pen=self.pen_up;self.error=""
                     self.executions.append(command["id"])
                     self.completed = command["id"]; self.queue.pop(0); self.active_command = None
                 if self.queue and not self.active_command:
@@ -152,7 +196,8 @@ class SimulatedRobot:
         self.next, self.completed = 1, 0
         self.receipts.clear(); self.queue.clear(); self.active_command = None
         self.homed = self.fault = self.hold = self.paused = False
-        self.pen = 90
+        self.pen = self.pen_up;self.pen_tuning=False
+        self.calibrating=False;self.reference="unknown";self.calibration_id="";self.draw_bounds=None;self.jog_steps=[0,0]
 
     async def close(self):
         self.lose()

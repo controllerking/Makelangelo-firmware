@@ -16,7 +16,39 @@
 <section class="card"><div class="panel-heading"><h2>Your robot</h2><span id="machine-state" class="subtle">Offline</span></div>
 <p id="connection-message" class="help" role="status">Connecting automatically</p>
 <div class="machine-readout"><div><small>Position</small><span id="position">—</span></div><div><small>Pen</small><span id="pen-state">—</span></div></div>
-<div class="button-row"><button id="home" class="button secondary">Home</button><button id="pen-up" class="button secondary">Pen up</button><button id="pen-down" class="button secondary">Pen down</button></div>
+<div class="button-row"><button id="home" class="button secondary">Switch home (later)</button><button id="pen-up" class="button secondary">Pen up</button><button id="pen-down" class="button secondary">Pen down</button></div>
+</section>
+<section class="card" id="calibration-card"><h2>Pen &amp; paper calibration</h2>
+<h3>Pen positions</h3>
+<p id="pen-cal-status" class="help" role="status">Pen endpoints have not been calibrated.</p>
+<p class="help">Pen in should clear the paper. Pen out should just touch it—not push hard. Support the gondola while adjusting and stop before any mechanical binding.</p>
+<label class="review"><input id="pen-cal-confirmed" type="checkbox"> I will supervise servo movement and keep the linkage clear.</label>
+<button id="pen-cal-begin" class="button secondary wide">Calibrate pen in / out</button>
+<div id="pen-cal-panel" hidden>
+<p id="pen-cal-angle" class="help"></p>
+<div class="button-row"><button id="pen-minus-thirty" class="button secondary">−30°</button><button id="pen-minus-ten" class="button secondary">−10°</button><button id="pen-plus-ten" class="button secondary">+10°</button><button id="pen-plus-thirty" class="button secondary">+30°</button></div>
+<div class="button-row"><button id="pen-minus-five" class="button secondary">−5°</button><button id="pen-minus-one" class="button secondary">−1°</button><button id="pen-plus-one" class="button secondary">+1°</button><button id="pen-plus-five" class="button secondary">+5°</button></div>
+<label>Go to servo angle · degrees<input id="pen-angle-target" type="number" min="10" max="170" step="1" required></label><button id="pen-angle-go" class="button secondary wide">Move gently to angle</button>
+<div class="button-row"><button id="pen-capture-in" class="button secondary">Set pen in / lifted</button><button id="pen-capture-out" class="button secondary">Set pen out / touching</button></div>
+<div class="button-row"><button id="pen-test-in" class="button secondary">Test pen in</button><button id="pen-test-out" class="button secondary">Test pen out</button></div>
+<div class="button-row"><button id="pen-cal-save" class="button">Save pen positions</button><button id="pen-cal-cancel" class="button secondary">Cancel &amp; lift pen</button></div>
+</div>
+<h3>Paper corners</h3>
+<p id="calibration-status" class="help" role="status">No saved calibration. Start below with the pen lifted.</p>
+<form id="calibration-form"><label>Motor shaft spacing · mm<input id="cal-width" type="number" min="100" max="2000" step=".001" placeholder="Measured spacing" required></label>
+<label>Paper to calibrate<select id="cal-paper"><option>Letter</option></select></label>
+<p class="help">Paper may be rotated. Jog the same pen-tip reference point to each corner: top-left → top-right → bottom-right → bottom-left. Drawings follow the four corners you capture. Do not move the gondola by hand during capture.</p>
+<label class="review"><input id="cal-confirmed" type="checkbox"> Pen is clear, belts are tensioned, and I will supervise every jog. Payout must lengthen the belt.</label>
+<button id="cal-begin" class="button secondary wide">Begin / restart calibration</button></form>
+<div id="cal-jog-panel" hidden><label>One-click jog distance<select id="cal-distance"><option value=".25">0.25 mm · fine</option><option value="1" selected>1 mm</option><option value="5">5 mm</option><option value="10">10 mm</option><option value="25">25 mm</option><option value="50">50 mm</option></select></label>
+<div class="button-row"><button id="cal-left-in" class="button secondary">Left retract</button><button id="cal-left-out" class="button secondary">Left payout</button></div>
+<div class="button-row wide"><button id="cal-right-in" class="button secondary">Right retract</button><button id="cal-right-out" class="button secondary">Right payout</button></div>
+<p id="cal-counts" class="help"></p><button id="cal-capture" class="button primary wide">Capture top-left</button>
+<button id="cal-finish" class="button primary wide" disabled>Validate & save corners</button>
+<p class="help">Jogs ramp up to 20 mm/s and are bounded to 50 mm per click; there is no automatic edge seeking. Check clearance before large jogs. Stop cancels motion and requires a reset. Keep the power switch accessible.</p></div>
+<div id="cal-restore-panel" hidden><p class="help">After reset, position is unknown. Jog to the exact saved top-left reference, or place it there before enabling motors. Then confirm below. Never restore at an arbitrary point.</p>
+<label class="review"><input id="cal-at-reference" type="checkbox"> The pen-tip reference is at the saved top-left corner, with unchanged paper, belt routing and motor geometry.</label>
+<button id="cal-restore" class="button secondary wide">Restore position at top-left</button></div>
 </section>
 <section class="card"><h2>Prepare your paper</h2><form id="art-form">
 <label class="file-picker">Upload artwork<input id="svg-file" type="file" accept=".svg,.png,.jpg,.jpeg,.webp,image/svg+xml,image/png,image/jpeg,image/webp"></label><p id="file-name" class="help">PNG, JPG, WebP or SVG. Converted locally—never uploaded to a cloud service.</p>

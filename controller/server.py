@@ -16,6 +16,7 @@ from .artwork import PAPER, demo_paths, prepare, svg_paths, finite
 from .transport import DeviceLink, DeviceError
 from .raster import PRESETS, preset, raster_paths
 from .config import ENV_FILE, RobotConfig, load_robot_config
+from .calibration import CORNERS, fit, reference_command
 
 ROOT = Path(__file__).parent
 MAX_BODY = 2_500_000
@@ -57,6 +58,12 @@ class Controller:
         self.operation_lock = asyncio.Lock()
         self.preparation_lock = asyncio.Lock()
         self.simulation = False
+        path=self.data_dir/"paper_calibration.json"
+        self.calibration=json.loads(path.read_text()) if path.exists() else None
+        self.calibration_draft=None
+        self.pen_draft=None
+        path=self.data_dir/"pen_calibration.json"
+        self.pen_calibration=json.loads(path.read_text()) if path.exists() else None
 
     def persist(self, job):
         path = self.data_dir/"jobs"/(job["id"]+".json")
@@ -68,6 +75,7 @@ class Controller:
 
     def disconnected(self, reason):
         self.connection_message = "Reconnecting automatically"
+        self.pen_draft=None # A hold may have lifted the servo; discard stale previews.
         if self.active and self.active in self.jobs:
             job = self.jobs[self.active]
             if job["state"] == "running":
@@ -90,7 +98,9 @@ class Controller:
                 "simulation":self.simulation,
                 "connection_message":self.connection_message, "active":self.active,
                 "jobs":[self.public_job(j) for j in sorted(self.jobs.values(), key=lambda j:j["created"], reverse=True)],
-                "papers":PAPER, "presets":PRESETS}
+                "papers":PAPER, "presets":PRESETS,
+                "calibration":self.calibration,"calibration_draft":self.calibration_draft,
+                "pen_calibration":self.pen_calibration,"pen_draft":self.pen_draft}
 
     async def connect(self):
         if not self.robot.host or not self.robot.token:
@@ -118,12 +128,139 @@ class Controller:
                     self.connection_message = "Robot unavailable; retrying automatically"
             await asyncio.sleep(retry_seconds)
 
+    async def calibration_action(self, data):
+        if not isinstance(data,dict): raise ValueError("Expected calibration settings")
+        if self.operation_lock.locked(): raise ValueError("Wait for the current manual action; jogs are not queued")
+        async with self.operation_lock:
+            if self.pen_draft: raise ValueError("Save or cancel pen calibration before calibrating paper")
+            d=self.link.state
+            if not self.link.connected or d.get("calibration_api") != 1:
+                raise ValueError("Connect the updated calibration-capable ESP32 firmware first")
+            if self.active or d.get("fault") or d.get("busy") or d.get("moving"):
+                raise ValueError("Calibration requires an idle robot with no active job or fault")
+            action=data.get("action")
+            async def send(command, timeout=15):
+                reply=await self.link.command(command)
+                await self.link.wait_completed(reply["id"],timeout=timeout)
+                if self.link.state.get("error"): raise DeviceError(self.link.state["error"])
+            if action=="begin":
+                if data.get("confirmed") is not True: raise ValueError("Confirm pen clearance, motor direction and supervised jogging")
+                paper=data.get("paper")
+                if not isinstance(paper,str) or paper not in PAPER: raise ValueError("Choose a known paper size")
+                width=finite(data.get("width"),"motor spacing")
+                if not 100<=width<=2000: raise ValueError("Motor spacing must be 100–2000 mm")
+                spu=d.get("steps_per_mm",[])
+                if len(spu)!=2 or not all(1<=finite(v)<=10000 for v in spu): raise ValueError("Invalid motor scale")
+                await send({"op":"cal_begin","confirm":True})
+                if not self.link.state.get("calibrating"): raise DeviceError("Calibration did not start")
+                self.calibration_draft={"paper":paper,"width":width,"spu":list(spu),
+                                        "boot":d["boot"],"corners":{}}
+            elif action=="restore":
+                if not self.calibration: raise ValueError("No saved paper calibration")
+                if data.get("at_top_left") is not True: raise ValueError("Place the pen at the saved top-left point and confirm")
+                if list(d.get("steps_per_mm",[]))!=self.calibration["spu"]:
+                    raise ValueError("Motor scale changed; recalibrate all corners")
+                await send(reference_command(self.calibration,self.calibration["corners"]["top_left"]["belts"]))
+                if self.link.state.get("calibration_id")!=self.calibration["id"]: raise DeviceError("Reference restore failed")
+                self.calibration_draft=None
+            else:
+                draft=self.calibration_draft
+                if not draft or draft["boot"]!=d.get("boot") or not d.get("calibrating"):
+                    raise ValueError("Calibration position was lost; begin again (or restore a saved top-left reference)")
+                if action=="jog":
+                    axis=data.get("axis")
+                    if type(axis) is not int or axis not in (0,1): raise ValueError("Choose the left or right motor")
+                    mm=finite(data.get("mm"),"jog distance")
+                    if not .05<=abs(mm)<=50: raise ValueError("Jog distance must be 0.05–50 mm")
+                    steps=round(mm*draft["spu"][axis])
+                    if not 1<=abs(steps)<=4000: raise ValueError("Jog must be 1–4000 pulses")
+                    await send({"op":"cal_jog","axis":axis,"steps":steps},
+                               timeout=max(15,abs(steps)/2000+abs(mm)/10+5))
+                    if not self.link.state.get("calibrating"): raise DeviceError("Jog interrupted; begin calibration again")
+                elif action=="capture":
+                    name=data.get("corner")
+                    expected=CORNERS[len(draft["corners"])] if len(draft["corners"])<4 else None
+                    if name!=expected: raise ValueError("Capture corners in order: top-left, top-right, bottom-right, bottom-left")
+                    await send({"op":"sync"})
+                    draft["corners"][name]=list(self.link.state["jog_steps"])
+                elif action=="finish":
+                    calibration=fit(draft)
+                    counts=self.link.state["jog_steps"]
+                    lengths=[z+c/s for z,c,s in zip(calibration["zero_belts"],counts,calibration["spu"])]
+                    await send(reference_command(calibration,lengths))
+                    if self.link.state.get("calibration_id")!=calibration["id"] or not self.link.state.get("homed"):
+                        raise DeviceError("Robot did not accept the calibrated reference")
+                    save_json(self.data_dir/"paper_calibration.json",calibration)
+                    self.calibration=calibration; self.calibration_draft=None
+                else: raise ValueError("Unknown calibration action")
+            return self.snapshot()
+
+    async def pen_calibration_action(self,data):
+        if not isinstance(data,dict): raise ValueError("Expected pen calibration settings")
+        if self.operation_lock.locked(): raise ValueError("Wait for the current manual action")
+        async with self.operation_lock:
+            d=self.link.state
+            if not self.link.connected or d.get("pen_calibration_api")!=1:
+                raise ValueError("Flash the pen-calibration firmware first")
+            if self.active or self.calibration_draft or d.get("calibrating") or d.get("fault") or d.get("busy") or d.get("moving"):
+                raise ValueError("Pen calibration needs an idle robot; finish paper calibration first")
+            action=data.get("action")
+            async def send(command):
+                reply=await self.link.command(dict(command,confirm=True))
+                await self.link.wait_completed(reply["id"],timeout=15)
+                if self.link.state.get("error"): raise DeviceError(self.link.state["error"])
+            if action=="begin":
+                if data.get("confirmed") is not True: raise ValueError("Confirm servo clearance and supervised pen adjustment")
+                self.pen_draft={"boot":d["boot"],"angle":d["pen"],"up":None,"down":None}
+            else:
+                draft=self.pen_draft
+                if not draft or draft["boot"]!=d.get("boot"):
+                    raise ValueError("Begin pen calibration again after a reboot")
+                if action in ("adjust","set"):
+                    if action=="adjust":
+                        delta=data.get("delta")
+                        if type(delta) is not int or delta not in (-30,-10,-5,-1,1,5,10,30): raise ValueError("Adjust by 1°, 5°, 10° or 30°")
+                        angle=draft["angle"]+delta
+                    else:
+                        angle=data.get("angle")
+                        if type(angle) is not int: raise ValueError("Enter a whole-number servo angle")
+                    if not 10<=angle<=170: raise ValueError("Servo adjustment range is 10–170°; do not force mechanical stops")
+                    await send({"op":"cal_pen","angle":angle})
+                    draft["angle"]=angle
+                elif action=="capture":
+                    role=data.get("role")
+                    if role not in ("up","down"): raise ValueError("Choose pen in or pen out")
+                    draft[role]=draft["angle"]
+                elif action=="test":
+                    role=data.get("role")
+                    if role not in ("up","down") or draft.get(role) is None: raise ValueError("Capture that pen position first")
+                    await send({"op":"cal_pen","angle":draft[role]})
+                    draft["angle"]=draft[role]
+                elif action=="save":
+                    up,down=draft["up"],draft["down"]
+                    if up is None or down is None or up==down: raise ValueError("Capture distinct pen-in and pen-out positions")
+                    await send({"op":"pen_config","up":up,"down":down})
+                    if self.link.state.get("pen_up")!=up or self.link.state.get("pen_down")!=down or not self.link.state.get("pen_calibrated"):
+                        raise DeviceError("Device did not save pen positions")
+                    self.pen_calibration={"up":up,"down":down,"created":time.time()}
+                    save_json(self.data_dir/"pen_calibration.json",self.pen_calibration)
+                    self.pen_draft=None
+                elif action=="cancel":
+                    await send({"op":"pen_end"})
+                    self.pen_draft=None
+                else: raise ValueError("Unknown pen calibration action")
+            return self.snapshot()
+
     def build_artwork(self, data, device):
         if not isinstance(data, dict): raise ValueError("Expected an artwork object")
         options = data.get("options", {})
         if not isinstance(options, dict): raise ValueError("Expected artwork options")
         quality, profile = preset(options)
         options = dict(options)
+        if self.calibration:
+            options.update(paper=self.calibration["paper"],left=self.calibration["left"],top=self.calibration["top"])
+            if self.calibration.get("version",1)>=2:
+                options["paper_corners"]=[self.calibration["corners"][key]["xy"] for key in CORNERS]
         options.setdefault("feed", profile["feed"])
         metadata, source_bounds = {"source_type":"svg", "quality":quality}, None
         if data.get("demo"):
@@ -141,6 +278,9 @@ class Controller:
             warnings.append("Temporary manual reference: speed capped at 2 mm/s; its limited travel envelope still applies.")
         prepared = prepare(paths, options, device.get("pen_up",90), device.get("pen_down",40), source_bounds)
         prepared.update(metadata, path_count=len(paths), feed=float(options["feed"]))
+        prepared["calibration_id"]=self.calibration["id"] if self.calibration else None
+        if self.calibration and self.calibration.get("max_error_mm",0)>3:
+            warnings.append("Captured corners accepted as provided. Paper-size mismatch is %.1f mm; verify the preview and use generous margins." % self.calibration["max_error_mm"])
         job = dict(prepared, id=str(uuid.uuid4()), title=title, warnings=warnings,
                    state="queued", created=time.time(), accepted=0, completed=0,
                    base_id=None, boot=None, message="Ready for review")
@@ -162,6 +302,15 @@ class Controller:
     def validate_job(self, job):
         if not self.link.connected: raise ValueError("Robot is offline; check the server configuration and network")
         d = self.link.state
+        if self.calibration_draft: raise ValueError("Finish calibration or restore the saved reference before drawing")
+        if self.pen_draft or d.get("pen_tuning"): raise ValueError("Save or cancel pen calibration before drawing")
+        if job.get("pen_up")!=d.get("pen_up",90) or job.get("pen_down")!=d.get("pen_down",40):
+            raise ValueError("Pen positions changed; prepare this drawing again")
+        if d.get("reference")=="user" or self.calibration:
+            if not self.calibration or d.get("calibration_id")!=self.calibration["id"]:
+                raise ValueError("Restore the saved top-left reference or recalibrate before drawing")
+            if job.get("calibration_id")!=self.calibration["id"]:
+                raise ValueError("Paper calibration changed; prepare this drawing again")
         if not d.get("homed"): raise ValueError("Home the calibrated robot first")
         if d.get("fault"): raise ValueError("Reset the robot and rehome after a fault")
         limits = d["limits"]
@@ -170,8 +319,12 @@ class Controller:
                 x,y = command["x"],command["y"]
                 if not limits[0][0] <= x <= limits[0][1] or not limits[1][0] <= y < limits[1][1]:
                     raise ValueError("Drawing lies outside the robot's calibrated limits")
+                if d.get("draw_bounds"):
+                    xmin,ymin,xmax,ymax=d["draw_bounds"]
+                    if not xmin<=x<=xmax or not ymin<=y<=ymax: raise ValueError("Drawing lies outside the captured paper envelope")
 
     async def start(self, job_id, reviewed=False):
+        if self.operation_lock.locked(): raise ValueError("Wait for the current manual action")
         if not reviewed: raise ValueError("Confirm the paper position and collision clearance first")
         if self.active: raise ValueError("Finish or stop the active job first")
         job = self.jobs[job_id]
@@ -273,7 +426,12 @@ class Controller:
     async def manual(self, op):
         async with self.operation_lock:
             if self.active: raise ValueError("Pause/stop the active job before manual controls")
-            if op == "home": command = {"op":"home"}
+            if self.pen_draft: raise ValueError("Use the pen calibration controls until saved or cancelled")
+            if self.calibration_draft and op != "pen_up": raise ValueError("Finish calibration before using other manual controls")
+            if op == "home":
+                if not self.link.state.get("switch_homing_enabled"):
+                    raise ValueError("Switch homing is not commissioned; use manual paper calibration")
+                command = {"op":"home"}
             elif op in ("pen_up","pen_down"):
                 command = {"op":"pen", "angle":self.link.state.get(op,90 if op=="pen_up" else 40)}
             else: raise ValueError("Unknown manual operation")
@@ -362,6 +520,8 @@ class HttpServer:
 
     async def api(self, path, data):
         c = self.controller
+        if path == "/api/calibration": return await c.calibration_action(data)
+        if path == "/api/pen-calibration": return await c.pen_calibration_action(data)
         if path == "/api/import": return await c.import_async(data)
         if path == "/api/start": return await c.start(data["id"], data.get("reviewed",False))
         if path == "/api/pause": return await c.pause()

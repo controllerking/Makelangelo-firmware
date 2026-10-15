@@ -2,6 +2,8 @@
 const $ = id => document.getElementById(id);
 let snapshot = {connected:false,device:{},jobs:[]}, selected = null, artwork = null, source = null;
 let toastTimer, statusBusy = false, preparing = false, revision = 0;
+let calibrationBusy=false, appliedCalibration=null, appliedPen=null, displayedPenAngle=null;
+const cornerNames=['top_left','top_right','bottom_right','bottom_left'];
 async function api(path, body) {
   const response = await fetch('/api/'+path, body === undefined ? {} : {
     method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -39,9 +41,13 @@ function render() {
       const option=document.createElement('option');option.value=name;option.textContent=name+(name.startsWith('A')?'':' in');return option;
     })); $('paper').value='18 × 24';
   }
+  renderCalibration();
+  renderPenCalibration();
   for (const id of ['home','pen-up','pen-down']) $(id).disabled=!connected || !!active || !!d.fault || !!d.paused;
   $('pen-down').disabled ||= !d.homed;
-  $('start').disabled=!connected || !d.homed || !!d.fault || !!active || !selected || !$('reviewed').checked || !!d.paused;
+  for(const id of ['home','pen-up','pen-down'])$(id).disabled ||= !!snapshot.pen_draft;
+  $('home').disabled ||= !d.switch_homing_enabled || !!snapshot.calibration || !!snapshot.calibration_draft;
+  $('start').disabled=!connected || !d.homed || !!d.fault || !!active || !selected || !$('reviewed').checked || !!d.paused || !!snapshot.calibration_draft || !!snapshot.pen_draft || !!d.pen_tuning;
   $('pause').disabled=!connected || !active || active.state!=='running';
   $('resume').disabled=!connected || (active ? active.state!=='paused' : !!d.busy) || !d.paused || !!d.moving || !!d.fault || !d.homed;
   $('resume').textContent=active?'Resume':'Resume robot';
@@ -60,6 +66,73 @@ function render() {
     button.append(title,meta,state);button.onclick=()=>act(async()=>{artwork=await api('jobs/'+job.id);selected=job.id;$('reviewed').checked=false;showArtwork();render();});
     queue.append(button);
   }
+}
+function renderCalibration() {
+  const d=snapshot.device, saved=snapshot.calibration, draft=snapshot.calibration_draft;
+  const ready=snapshot.connected && d.calibration_api===1 && !d.fault && !snapshot.active;
+  const valid=draft && draft.boot===d.boot && d.calibrating;
+  const idle=ready && !calibrationBusy && !d.busy && !d.moving;
+  if($('cal-paper').options.length===1 && snapshot.papers){
+    $('cal-paper').replaceChildren(...Object.keys(snapshot.papers).map(name=>{
+      const o=document.createElement('option');o.value=name;o.textContent=name;return o;
+    }));$('cal-paper').value=saved?.paper||'Letter';
+  }
+  if(saved && appliedCalibration!==saved.id){
+    appliedCalibration=saved.id; revision++; selected=null;artwork=null;$('reviewed').checked=false;
+    $('paper').value=saved.paper;$('left').value=saved.left.toFixed(3);$('top').value=saved.top.toFixed(3);
+    $('cal-width').value=saved.width;$('cal-paper').value=saved.paper;showArtwork();
+  }
+  $('paper').disabled=!!saved;$('left').readOnly=$('top').readOnly=!!saved;
+  const count=valid?Object.keys(draft.corners).length:0;
+  $('calibration-status').textContent=!snapshot.connected?'Robot offline. Saved calibration is retained.':d.calibration_api!==1?'Update ESP32 firmware to enable manual calibration.':valid?
+    count+'/4 corners captured. '+(count<4?'Next: '+cornerNames[count].replaceAll('_',' '):'All captured; validate and save.'):
+    saved?(d.calibration_id===saved.id && d.homed?'Calibrated · normal drawing speeds enabled.':'Saved paper calibration · restore the top-left reference before drawing.'):'No saved calibration. Start with the pen lifted.';
+  $('cal-begin').disabled=!idle || !$('cal-confirmed').checked || !!snapshot.pen_draft || !!d.pen_tuning;
+  $('cal-width').disabled=$('cal-paper').disabled=calibrationBusy;
+  $('cal-jog-panel').hidden=!valid;
+  $('cal-counts').textContent='Belt pulse offsets: '+(d.jog_steps||[0,0]).join(' / ');
+  for(const id of ['cal-left-in','cal-left-out','cal-right-in','cal-right-out'])$(id).disabled=!idle || !valid;
+  $('cal-capture').disabled=!idle || !valid || count>=4;
+  $('cal-capture').textContent=count<4?'Capture '+cornerNames[count].replaceAll('_',' '):'All corners captured';
+  $('cal-finish').disabled=!idle || !valid || count!==4;
+  $('cal-restore-panel').hidden=!saved;
+  $('cal-restore').disabled=!idle || !$('cal-at-reference').checked;
+}
+async function calibrate(body){
+  if(calibrationBusy)return;
+  calibrationBusy=true;render();
+  try { snapshot=await api('calibration',body);$('cal-at-reference').checked=false;render(); }
+  catch(e){toast(e.message);}
+  finally{calibrationBusy=false;await refresh();}
+}
+function renderPenCalibration(){
+  const d=snapshot.device,draft=snapshot.pen_draft;
+  if(snapshot.connected && Number.isFinite(d.pen_up) && Number.isFinite(d.pen_down)){
+    const key=d.pen_up+':'+d.pen_down;
+    if(appliedPen!==null && appliedPen!==key){revision++;selected=null;artwork=null;$('reviewed').checked=false;showArtwork();}
+    appliedPen=key;
+  }
+  const valid=draft && draft.boot===d.boot;
+  const idle=snapshot.connected && d.pen_calibration_api===1 && !d.fault && !snapshot.active && !d.busy && !d.moving && !calibrationBusy && !snapshot.calibration_draft && !d.calibrating;
+  $('pen-cal-status').textContent=d.pen_calibration_api!==1?'Firmware update required for pen calibration.':
+    valid?'Adjust gently and capture both positions.':
+    (d.pen_calibrated?'Saved':'Default')+' · pen in '+d.pen_up+'° · pen out '+d.pen_down+'°';
+  $('pen-cal-begin').disabled=!idle || !$('pen-cal-confirmed').checked || !!valid;
+  $('pen-cal-panel').hidden=!valid;
+  $('pen-cal-angle').textContent=valid?'Servo '+draft.angle+'° · in '+(draft.up??'not set')+' · out '+(draft.down??'not set'):'';
+  if(valid && displayedPenAngle!==draft.angle){$('pen-angle-target').value=draft.angle;displayedPenAngle=draft.angle;}
+  if(!valid)displayedPenAngle=null;
+  for(const id of ['pen-minus-thirty','pen-minus-ten','pen-plus-ten','pen-plus-thirty','pen-minus-five','pen-minus-one','pen-plus-one','pen-plus-five','pen-angle-target','pen-angle-go','pen-capture-in','pen-capture-out','pen-cal-cancel'])$(id).disabled=!idle || !valid;
+  $('pen-test-in').disabled=!idle || !valid || draft.up===null;
+  $('pen-test-out').disabled=!idle || !valid || draft.down===null;
+  $('pen-cal-save').disabled=!idle || !valid || draft.up===null || draft.down===null || draft.up===draft.down;
+}
+async function calibratePen(body){
+  if(calibrationBusy)return;
+  calibrationBusy=true;render();
+  try{snapshot=await api('pen-calibration',body);render();}
+  catch(e){toast(e.message);}
+  finally{calibrationBusy=false;await refresh();}
 }
 function options() {
   return {paper:$('paper').value,left:$('left').value,top:$('top').value,margin:$('margin').value,feed:$('feed').value,
@@ -121,11 +194,21 @@ function draw() {
   const scale=Math.min((box.width-64)/w,(box.height-48)/h);
   const ox=(box.width-w*scale)/2,oy=(box.height-h*scale)/2;
   ctx.shadowColor='#30402b22';ctx.shadowBlur=18;ctx.shadowOffsetY=5;
-  ctx.fillStyle='#fffefa';ctx.fillRect(ox,oy,w*scale,h*scale);ctx.shadowColor='transparent';
+  const corners=artwork?.paper_corners;
+  const outline=points=>{
+    ctx.beginPath();points.forEach(([x,y],i)=>{const px=ox+(x-left)*scale,py=oy+(top-y)*scale;i?ctx.lineTo(px,py):ctx.moveTo(px,py);});ctx.closePath();
+  };
+  ctx.fillStyle='#fffefa';
+  if(corners){outline(corners);ctx.fill();}else ctx.fillRect(ox,oy,w*scale,h*scale);
+  ctx.shadowColor='transparent';
   if (!artwork) return;
   const margin=artwork.margin;
   ctx.strokeStyle='#cbd3c2';ctx.setLineDash([3,5]);ctx.lineWidth=.7;
-  ctx.strokeRect(ox+margin*scale,oy+margin*scale,(w-2*margin)*scale,(h-2*margin)*scale);
+  if(corners){
+    const [pw,ph]=artwork.paper_size;
+    const inset=[[margin/pw,margin/ph],[1-margin/pw,margin/ph],[1-margin/pw,1-margin/ph],[margin/pw,1-margin/ph]];
+    outline(inset.map(([u,v])=>[0,1].map(axis=>(1-u)*(1-v)*corners[0][axis]+u*(1-v)*corners[1][axis]+u*v*corners[2][axis]+(1-u)*v*corners[3][axis])));ctx.stroke();
+  }else ctx.strokeRect(ox+margin*scale,oy+margin*scale,(w-2*margin)*scale,(h-2*margin)*scale);
   ctx.setLineDash([]);ctx.strokeStyle='#314a3c';ctx.lineWidth=.7;ctx.lineCap='round';ctx.lineJoin='round';
   for (const path of artwork.paths) {
     ctx.beginPath();
@@ -136,6 +219,25 @@ function draw() {
 $('home').onclick=()=>act(async()=>{toast('Homing. Keep the carriage path clear.');await api('manual',{op:'home'});});
 $('pen-up').onclick=()=>act(()=>api('manual',{op:'pen_up'}));
 $('pen-down').onclick=()=>act(()=>api('manual',{op:'pen_down'}));
+$('calibration-form').onsubmit=e=>{
+  e.preventDefault(); if(!$('calibration-form').reportValidity())return;
+  calibrate({action:'begin',paper:$('cal-paper').value,width:$('cal-width').value,confirmed:$('cal-confirmed').checked});
+};
+for(const [id,axis,sign] of [['cal-left-in',0,-1],['cal-left-out',0,1],['cal-right-in',1,-1],['cal-right-out',1,1]])
+  $(id).onclick=()=>calibrate({action:'jog',axis,mm:sign*Number($('cal-distance').value)});
+$('cal-capture').onclick=()=>calibrate({action:'capture',corner:cornerNames[Object.keys(snapshot.calibration_draft?.corners||{}).length]});
+$('cal-finish').onclick=()=>calibrate({action:'finish'});
+$('cal-restore').onclick=()=>calibrate({action:'restore',at_top_left:$('cal-at-reference').checked});
+$('cal-confirmed').onchange=$('cal-at-reference').onchange=render;
+$('pen-cal-confirmed').onchange=render;
+$('pen-cal-begin').onclick=()=>calibratePen({action:'begin',confirmed:$('pen-cal-confirmed').checked});
+for(const [id,delta] of [['pen-minus-thirty',-30],['pen-minus-ten',-10],['pen-minus-five',-5],['pen-minus-one',-1],['pen-plus-one',1],['pen-plus-five',5],['pen-plus-ten',10],['pen-plus-thirty',30]])
+  $(id).onclick=()=>calibratePen({action:'adjust',delta});
+$('pen-angle-go').onclick=()=>{if($('pen-angle-target').reportValidity())calibratePen({action:'set',angle:Number($('pen-angle-target').value)});};
+for(const [id,action,role] of [['pen-capture-in','capture','up'],['pen-capture-out','capture','down'],['pen-test-in','test','up'],['pen-test-out','test','down']])
+  $(id).onclick=()=>calibratePen({action,role});
+$('pen-cal-save').onclick=()=>calibratePen({action:'save'});
+$('pen-cal-cancel').onclick=()=>calibratePen({action:'cancel'});
 $('svg-file').onchange=()=>act(async()=>{
   const file=$('svg-file').files[0];if (!file)return;
   source=null;invalidate();$('image-settings').hidden=true;

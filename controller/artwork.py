@@ -303,6 +303,29 @@ def prepare(paths, options, pen_up=90, pen_down=40, source_bounds=None):
     oy = top-(ph-height*scale)/2
     placed = [[(round(ox+(x-minx)*scale, 3), round(oy-(y-miny)*scale, 3))
                for x,y in path] for path in paths]
+    corners = options.get("paper_corners")
+    paper_rect = [left,top,pw,ph]
+    if corners is not None:
+        if len(corners)!=4 or any(len(p)!=2 for p in corners): raise ValueError("Expected four paper corners")
+        corners = [[finite(v,"paper corner") for v in p] for p in corners]
+        def warp(p):
+            u,v = (p[0]-left)/pw,(top-p[1])/ph
+            weights = [(1-u)*(1-v),u*(1-v),u*v,(1-u)*v]
+            return tuple(round(sum(w*c[axis] for w,c in zip(weights,corners)),3) for axis in range(2))
+        warped,point_count = [],0
+        for path in placed:
+            result = [warp(path[0])]
+            for a,b in zip(path,path[1:]):
+                # Bilinear placement can curve a diagonal. Subdivide first.
+                n = max(1,math.ceil(math.dist(a,b)/5))
+                if point_count+len(result)+n>MAX_POINTS: raise ValueError("Too many transformed drawing points")
+                result.extend(warp((a[0]+(b[0]-a[0])*i/n,a[1]+(b[1]-a[1])*i/n)) for i in range(1,n+1))
+            warped.append(result)
+            point_count += len(result)
+        placed = warped
+        xmin,xmax = min(p[0] for p in corners),max(p[0] for p in corners)
+        ymin,ymax = min(p[1] for p in corners),max(p[1] for p in corners)
+        paper_rect = [xmin,ymax,xmax-xmin,ymax-ymin]
     commands, seconds, drawn, travel = [], 0., 0., 0.
     previous = None
     for path in placed:
@@ -325,7 +348,7 @@ def prepare(paths, options, pen_up=90, pen_down=40, source_bounds=None):
     seconds += (drawn+travel)/feed
     return {"commands":commands, "paths":placed, "paper":paper,
             "pen_up":pen_up, "pen_down":pen_down,
-            "paper_rect":[left,top,pw,ph], "margin":margin,
+            "paper_rect":paper_rect, "paper_corners":corners, "paper_size":[pw,ph], "margin":margin,
             "bounds":[min(p[0] for path in placed for p in path),
                       min(p[1] for path in placed for p in path),
                       max(p[0] for path in placed for p in path),

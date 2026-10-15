@@ -58,6 +58,13 @@ Use the computer's LAN address instead of 127.0.0.1 in that private URL, keeping
 
 ## First use
 
+With no limit switches, use the [manual four-corner calibration workflow](../docs/USER_CALIBRATION.md)
+instead of switch homing. The web UI provides bounded belt jogs, sequential
+corner captures, validation and persistent paper settings. Successful calibration
+enables normal preset speeds; after a reboot, explicitly restore at the saved
+top-left point before drawing. Captured paper settings override the old paper
+origin fields. No physical position is restored automatically.
+
 1. Upload the ESP32 firmware and commission motors/switches/geometry using [the hardware guide](../docs/ESP32_WIRING_AND_SETUP.md).
 2. Configure the robot's Wi-Fi and obtain its pairing key using [wireless setup](../docs/WIRELESS_CONTROL.md).
 3. Put the fixed robot hostname/IP, TCP port and pairing key in the server's private `.env` file and start the server. Linking happens automatically; the UI only shows connection status.
