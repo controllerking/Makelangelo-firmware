@@ -1,5 +1,95 @@
 # Development Progress Log
 
+## 2026-10-14 — coarse and direct pen adjustment
+
+- Added ±10°/±30° alongside fine ±1°/±5° controls, plus direct whole-degree
+  targets within 10–170°. Existing firmware gentle ramp remains unchanged.
+- Four focused pen tests and web regression checks passed. Local controller
+  updated without flashing, retaining captured endpoints and the private link.
+
+## 2026-10-14 — user-calibrated pen in/out endpoints
+
+- Added independent supervised pen calibration within the local calibration
+  card: ±1°/±5° preview, capture/test in/out, save and cancel/lift. No XY homing
+  is needed; paper capture and drawing remain mutually exclusive with tuning.
+- New authenticated, deduplicated idle-only cal_pen/pen_config/pen_end commands;
+  bounds 10–170°, distinct endpoints, either linkage direction supported.
+- ESP32 saves endpoints together in one NVS value and loads before servo attach.
+  Drawing, hold/Stop and calibration use those endpoints. Host keeps a record;
+  changing angles invalidates prepared jobs without changing paper calibration.
+- Includes the gentle servo ramp. With user approval, flashed over USB at
+  115200 baud; application hash verified. Restarted the local controller with
+  the same private link; pen_calibration_api=1, no fault/motion, saved paper
+  calibration retained. Physical position must be restored explicitly.
+- Firmware compile, 10 focused pen/paper tests, servo-ramp sanitizer test and
+  existing web regression checks passed. No device pen preview was sent.
+
+## 2026-10-14 — gentle pen actuation
+
+- ESP32 PWM now follows an acceleration-limited, nonblocking ramp: 35°/s
+  maximum and 100°/s² acceleration in both directions. Target writes remain
+  ISR-safe; small PWM changes are applied only from the main task.
+- Wireless pen commands and resume wait for the commanded ramp plus 300 ms
+  settling before XY motion. Calibration begin and switch homing wait for
+  pen-up completion. Stop/link service remains responsive during the ramp.
+- Pen angles and motor jog/drawing speeds are unchanged. The standard 50°
+  pen stroke takes about 1.7 seconds instead of an immediate target jump.
+
+## 2026-10-14 — accept rotated and imperfect captured paper outlines
+
+- Removed axis-aligned fitting and the 3 mm residual rejection. Infer the two
+  belt offsets with rotation-invariant pairwise distances, then retain all four
+  measured corners. Paper-size disagreement becomes an advisory warning.
+- Map artwork and margins bilinearly into the captured quadrilateral, subdivide
+  transformed segments and show the actual outline in the local preview.
+- Keep distinct/non-crossing/convex and reachable-machine-region checks. Belt
+  lengths are still estimated from paper size, motor spacing and pulse scale;
+  accepting captures is not a guarantee of metric accuracy.
+- Seven focused calibration tests pass, including rotated paper, imperfect
+  captures, artwork placement and the exact captures from the rejected session.
+
+## 2026-10-14 — calibration speed increased again
+
+- Increased calibration jog ceiling from 10 to 20 mm/s and acceleration from
+  20 to 40 mm/s². Retained 2 mm/s endpoints, 2000 pulses/s ceiling, 50 mm clicks
+  and cooperative Stop/link-loss checks. Updated local UI and operator guide.
+
+## 2026-10-14 — faster, longer calibration jogs
+
+- One-click distances now include 10, 25 and 50 mm; controller, simulator and
+  firmware accept up to 4000 pulses. Default remains 1 mm for fine positioning.
+- Calibration ramps from 2 to 10 mm/s at 20 mm/s² and decelerates at the end;
+  cooperative stop/link-loss checks remain active throughout each jog.
+- Firmware build and the focused jog-boundary test passed; full suite omitted
+  per user request. Updated operator guidance; no automatic test jog sent.
+
+## 2026-10-14 — front-facing motor channel correction
+
+- User observed left controls operating the physical right motor, and right
+  retract paying out the physical left belt. Swapped STEP/DIR/EN channel groups:
+  logical left = 18/19/23; logical right = 26/27/25. Switch inputs remain 32/33.
+- Added per-axis direction inversion, left enabled/right unchanged, applied
+  consistently to startup, calibration jogs, D0, planner direction and homing.
+- Updated wiring/PCB pin maps. Earlier captures must be discarded and calibration
+  restarted. Compile-only verification requested by user; no automatic jog sent.
+
+## 2026-10-14 — switch-free user paper calibration
+
+- Added web-controlled bounded belt jogs, ordered TL/TR/BR/BL capture, geometry
+  fitting/validation and owner-only persistent paper calibration. Normal
+  preset speeds apply after acceptance; independent device paper bounds remain.
+- Added explicit top-left reference recovery after reset; never restore physical
+  position automatically. Unfinished calibration aborts on pause/link loss.
+- Firmware build, 34 Python tests, sanitized C++ bounds/geometry tests and
+  JavaScript regression checks passed. Physical corner capture awaits user test.
+- With user approval/readiness, flashed ESP32 successfully (upload hashes
+  verified). Image SHA256:
+  `8c048277cd286f0e490557b32f2bf52d47298f6de39c99b518eacea736a842ea`.
+- Updated controller reconnected; live telemetry verified calibration_api=1,
+  position unknown, pen commanded 90, no fault/motion and switch homing disabled.
+  No calibration jog or XY move was sent automatically.
+- See USER_CALIBRATION.md for geometry assumptions, workflow and recovery.
+
 ## 2026-10-13 — fixed server-side robot linking
 
 - Removed the two requested introductory sentences and the browser address/key
