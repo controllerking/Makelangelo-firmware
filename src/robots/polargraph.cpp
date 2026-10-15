@@ -479,9 +479,9 @@ void factory_reset() {
   for (int i = 0; i < NUM_AXIES; ++i) {
     axies[i].limitMin = axies[i].limitMax = axies[i].homePos = axies[i].pos = 0;
   }
-  axies[2].limitMin = _MIN(PEN_UP_ANGLE, PEN_DOWN_ANGLE);
-  axies[2].limitMax = _MAX(PEN_UP_ANGLE, PEN_DOWN_ANGLE);
-  axies[2].pos = PEN_UP_ANGLE;
+  axies[2].limitMin = 10;
+  axies[2].limitMax = 170;
+  axies[2].pos = wallPenUpAngle();
   calibrateLeft = calibrateRight = 0;
 #endif
   motor_spu[0]=STEPS_PER_UNIT;

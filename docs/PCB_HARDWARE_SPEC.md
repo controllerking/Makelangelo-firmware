@@ -146,12 +146,12 @@ positions and not ESP32 module pad numbers**. All digital connections here use
 
 | ESP32 GPIO | MCU-side net | Series resistor | Driver-side net / destination | Bias at driver side |
 | --- | --- | --- | --- | --- |
-| 26 | L_STEP_MCU | R1 = 33 Ω | L_STEP -> U2.STEP | R7 = 100 kΩ to GND |
-| 27 | L_DIR_MCU | R2 = 33 Ω | L_DIR -> U2.DIR | R8 = 100 kΩ to GND |
-| 25 | L_EN_MCU | R3 = 100 Ω | L_EN_N -> U2.EN/ENN | R9 = 10 kΩ to +3V3_LOGIC |
-| 18 | R_STEP_MCU | R4 = 33 Ω | R_STEP -> U3.STEP | R10 = 100 kΩ to GND |
-| 19 | R_DIR_MCU | R5 = 33 Ω | R_DIR -> U3.DIR | R11 = 100 kΩ to GND |
-| 23 | R_EN_MCU | R6 = 100 Ω | R_EN_N -> U3.EN/ENN | R12 = 10 kΩ to +3V3_LOGIC |
+| 18 | L_STEP_MCU | R1 = 33 Ω | L_STEP -> U2.STEP | R7 = 100 kΩ to GND |
+| 19 | L_DIR_MCU | R2 = 33 Ω | L_DIR -> U2.DIR | R8 = 100 kΩ to GND |
+| 23 | L_EN_MCU | R3 = 100 Ω | L_EN_N -> U2.EN/ENN | R9 = 10 kΩ to +3V3_LOGIC |
+| 26 | R_STEP_MCU | R4 = 33 Ω | R_STEP -> U3.STEP | R10 = 100 kΩ to GND |
+| 27 | R_DIR_MCU | R5 = 33 Ω | R_DIR -> U3.DIR | R11 = 100 kΩ to GND |
+| 25 | R_EN_MCU | R6 = 100 Ω | R_EN_N -> U3.EN/ENN | R12 = 10 kΩ to +3V3_LOGIC |
 | 32 | LIMIT_L | R17 filter path, section 6 | J5 left NC switch | R15 pull-up |
 | 33 | LIMIT_R | R18 filter path, section 6 | J6 right NC switch | R16 pull-up |
 | 21 | SERVO_PWM_3V3 | U5 buffer, section 7 | J7.3 servo signal | R19 = 100 kΩ to GND on U5 input |
@@ -221,7 +221,9 @@ connectors, viewed/numbered according to the chosen manufacturer drawing:
 Pin order is a **new carrier harness contract**, not a claim about an existing
 motor cable plug. Verify each winding by continuity and crimp the harness to
 match. If direction is wrong, power off and swap one complete coil's ends.
-Positive D0 jog / DIR LOW must pay out the gondola-side belt. Never hot-plug a
+Positive D0 jog must pay out the gondola-side belt. Prototype firmware uses
+left DIR HIGH (inverted), right DIR LOW; the 2026-10-14 channel mapping above
+matches the actual front-facing motor locations. Never hot-plug a
 motor or disconnect a coil with VM energized; let stored energy discharge.
 
 Use contacts rated at least 2 A per circuit and 30 V DC under the selected

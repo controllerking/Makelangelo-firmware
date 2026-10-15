@@ -1,5 +1,6 @@
 #include "../src/homing_axis.h"
 #include "../src/polargraph_math.h"
+#include "../src/user_calibration_math.h"
 #include "../src/wire_protocol.h"
 #include <cassert>
 #include <cstdio>
@@ -7,6 +8,14 @@
 
 static void testGeometry() {
   float x, y;
+  const float bounds[]={200,-450,420,-170};
+  assert(userCalibrationBounds(644.525f,200,-450,420,-170));
+  assert(!userCalibrationBounds(644.525f,200,-450,650,-170));
+  assert(!userCalibrationBounds(644.525f,200,-450,420,0));
+  assert(!userCalibrationBounds(NAN,200,-450,420,-170));
+  assert(userCalibrationContains(200,-450,bounds));
+  assert(!userCalibrationContains(199.99f,-450,bounds));
+  assert(!userCalibrationContains(200,-450.01f,bounds));
   assert(polargraphPosition(0, 644.525f, 0, 381, 406.4f, x, y));
   assert(polargraphManualTarget(x+10, y-10, x, y));
   assert(!polargraphManualTarget(x+10.1f, y, x, y));

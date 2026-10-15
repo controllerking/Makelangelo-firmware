@@ -3,6 +3,7 @@
 #include "wireless.h"
 #include "wall_polargraph.h"
 #include "wire_protocol.h"
+#include "user_calibration_math.h"
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
@@ -40,7 +41,10 @@ struct Command {
   uint32_t id;
   char op[12];
   float x, y, feed;
-  int angle;
+  int angle, penUp, penDown;
+  int axis, steps;
+  float width, left, right, bounds[4];
+  char calibrationId[37];
 };
 Command queue[queueCapacity];
 unsigned head = 0, count = 0;
@@ -79,7 +83,18 @@ void state(JsonObject out) {
   out["queue_free"] = queueCapacity - count;
   out["planner_free"] = Planner::movesFree();
   out["homed"] = wallPositionKnown();
-  out["reference"] = wallManualReference() ? "manual" : (wallPositionKnown() ? "switches" : "unknown");
+  out["reference"] = wallUserReference() ? "user" : (wallManualReference() ? "manual" : (wallPositionKnown() ? "switches" : "unknown"));
+  out["calibration_api"] = 1;
+  out["switch_homing_enabled"] = bool(WALL_HOMING_CONFIRMED);
+  out["calibrating"] = wallCalibrationActive();
+  out["calibration_id"] = wallCalibrationId();
+  JsonArray counts = out.createNestedArray("jog_steps");
+  JsonArray scale = out.createNestedArray("steps_per_mm");
+  for (int i=0;i<2;++i) { counts.add(wallCalibrationSteps(i)); scale.add(motor_spu[i]); }
+  if (wallUserReference()) {
+    JsonArray bounds=out.createNestedArray("draw_bounds");
+    for (int i=0;i<4;++i) bounds.add(wallDrawingBound(i));
+  }
   out["fault"] = wallStopped();
   out["paused"] = paused;
   out["holding"] = hold;
@@ -88,7 +103,9 @@ void state(JsonObject out) {
   out["homing"] = wallIsHoming();
   out["x"] = axies[0].pos; out["y"] = axies[1].pos;
   out["pen"] = servos[0].read();
-  out["pen_up"] = PEN_UP_ANGLE; out["pen_down"] = PEN_DOWN_ANGLE;
+  out["pen_up"] = wallPenUpAngle(); out["pen_down"] = wallPenDownAngle();
+  out["pen_calibration_api"]=1;out["pen_calibrated"]=wallPenCalibrated();
+  out["pen_tuning"]=wallPenTuning();
   out["position_kind"] = planner.movesPlanned() ? "planned" : "settled";
   JsonArray limits = out.createNestedArray("limits");
   for (int i = 0; i < 2; ++i) {
@@ -98,7 +115,7 @@ void state(JsonObject out) {
   out["error"] = lastError;
 }
 void status(const char *type = "status") {
-  StaticJsonDocument<1024> doc;
+  StaticJsonDocument<2048> doc;
   doc["type"] = type;
   state(doc.as<JsonObject>());
   writeJson(doc);
@@ -111,10 +128,11 @@ void error(const char *message, uint32_t id = 0) {
 }
 void requestHold() {
   hold = true;
+  wallCalibrationAbort();
   if (wallIsHoming()) wallEmergencyStop();
 }
 void lostConnection() {
-  if (authenticated && (count || planner.movesPlanned() || servos[0].read() != PEN_UP_ANGLE))
+  if (authenticated && (count || planner.movesPlanned() || wallCalibrationActive() || wallPenTuning() || servos[0].read() != wallPenUpAngle()))
     requestHold();
   authenticated = false;
   socketAssigned = false;
@@ -122,7 +140,7 @@ void lostConnection() {
   client.stop();
 }
 void acknowledge(uint32_t id, bool duplicate) {
-  StaticJsonDocument<1024> doc;
+  StaticJsonDocument<2048> doc;
   doc["type"] = "ack"; doc["id"] = id; doc["duplicate"] = duplicate;
   state(doc.as<JsonObject>()); writeJson(doc);
 }
@@ -167,7 +185,7 @@ void handleLine(const char *raw) {
       restoring = true; settleUntil = millis() + 300;
       hold = false; paused = false;
     }
-    StaticJsonDocument<1024> reply;
+    StaticJsonDocument<2048> reply;
     reply["type"] = "control"; reply["request"] = doc["request"] | "";
     reply["op"] = type; state(reply.as<JsonObject>()); writeJson(reply); return;
   }
@@ -183,27 +201,62 @@ void handleLine(const char *raw) {
       decision == WireLedger::Stale ? "stale_id" : "out_of_order", id); return;
   }
   if (wallStopped()) { error("fault", id); return; }
-  if (hold || paused) { error("paused", id); return; }
+  const String op = doc["op"] | "";
+  const bool calibrationCommand = op == "cal_begin" || op == "cal_jog" || op == "cal_apply";
+  const bool penCommand=op=="cal_pen" || op=="pen_config" || op=="pen_end";
+  if ((hold || paused) && op != "cal_begin" && op != "cal_apply" && !penCommand) { error("paused", id); return; }
+  if (penCommand && (!wallHardwareReady() || count || !idle() || wallCalibrationActive())) { error("calibration_busy",id); return; }
+  if (wallPenTuning() && !penCommand && op!="sync" && op!="pen") { error("pen_calibration_active",id); return; }
+  if (calibrationCommand && (count || !idle())) { error("calibration_busy",id); return; }
+  if (wallCalibrationActive() && !calibrationCommand && op != "sync" && op != "pen") {
+    error("calibration_active",id); return;
+  }
   if (count == queueCapacity) { error("queue_full", id); return; }
   Command cmd = {};
   cmd.id = id;
-  const String op = doc["op"] | "";
-  if (op == "move") {
+  if (penCommand) {
+    if (!doc["confirm"].is<bool>() || !doc["confirm"].as<bool>()) { error("confirmation_required",id); return; }
+    if (op=="cal_pen") {
+      if (!doc["angle"].is<int>() || doc["angle"].as<int>()<10 || doc["angle"].as<int>()>170) { error("invalid_pen",id); return; }
+      cmd.angle=doc["angle"];
+    } else if (op=="pen_config") {
+      if (!doc["up"].is<int>() || !doc["down"].is<int>()) { error("invalid_pen",id); return; }
+      cmd.penUp=doc["up"];cmd.penDown=doc["down"];
+      if (cmd.penUp<10 || cmd.penUp>170 || cmd.penDown<10 || cmd.penDown>170 || cmd.penUp==cmd.penDown) { error("invalid_pen",id); return; }
+    }
+  } else if (op == "cal_begin") {
+    if (!doc["confirm"].is<bool>() || !doc["confirm"].as<bool>()) { error("confirmation_required",id); return; }
+  } else if (op == "cal_jog") {
+    if (!wallCalibrationActive() || !doc["axis"].is<int>() || !doc["steps"].is<int>()) { error("invalid_jog",id); return; }
+    cmd.axis=doc["axis"]; cmd.steps=doc["steps"];
+    if (cmd.axis < 0 || cmd.axis > 1 || cmd.steps == 0 || cmd.steps < -4000 || cmd.steps > 4000) { error("invalid_jog",id); return; }
+  } else if (op == "cal_apply") {
+    const char *fields[]={"width","l","r","xmin","ymin","xmax","ymax"};
+    for (const char *field:fields) if (!doc[field].is<float>() || !isfinite(doc[field].as<float>())) { error("invalid_calibration",id); return; }
+    if (!doc["confirm"].is<bool>() || !doc["confirm"].as<bool>()) { error("confirmation_required",id); return; }
+    cmd.width=doc["width"]; cmd.left=doc["l"]; cmd.right=doc["r"];
+    cmd.bounds[0]=doc["xmin"]; cmd.bounds[1]=doc["ymin"]; cmd.bounds[2]=doc["xmax"]; cmd.bounds[3]=doc["ymax"];
+    const String cid=doc["cal_id"] | "";
+    if (cid.length()!=36 || !userCalibrationBounds(cmd.width,cmd.bounds[0],cmd.bounds[1],cmd.bounds[2],cmd.bounds[3])) { error("invalid_calibration",id); return; }
+    cid.toCharArray(cmd.calibrationId,sizeof(cmd.calibrationId));
+    for (int i=0;i<36;++i) if (!isxdigit(cmd.calibrationId[i]) && cmd.calibrationId[i]!='-') { error("invalid_calibration",id); return; }
+  } else if (op == "move") {
     if (!doc["x"].is<float>() || !doc["y"].is<float>() || !doc["feed"].is<float>()) {
       error("invalid_move", id); return;
     }
     cmd.x = doc["x"]; cmd.y = doc["y"]; cmd.feed = doc["feed"];
-    float target[NUM_AXIES] = {cmd.x, cmd.y, float(PEN_UP_ANGLE)};
+    float target[NUM_AXIES] = {cmd.x, cmd.y, float(wallPenUpAngle())};
     if (!isfinite(cmd.feed) || cmd.feed < 0.1f || cmd.feed > 30 ||
         !wallMoveAllowed(target)) { error("invalid_move_or_unhomed", id); return; }
   } else if (op == "pen") {
     if (!doc["angle"].is<int>()) { error("invalid_pen", id); return; }
     cmd.angle = doc["angle"];
     if (cmd.angle < axies[2].limitMin || cmd.angle > axies[2].limitMax ||
-        (cmd.angle != PEN_UP_ANGLE && !wallPositionKnown())) { error("invalid_pen", id); return; }
+        (cmd.angle != wallPenUpAngle() && !wallPositionKnown())) { error("invalid_pen", id); return; }
   } else if (op != "home" && op != "sync") { error("unknown_operation", id); return; }
   op.toCharArray(cmd.op, sizeof(cmd.op));
   queue[(head + count) % queueCapacity] = cmd; ++count;
+  if (op=="cal_begin" || op=="cal_apply" || penCommand) { hold=paused=false; restoring=penSettling=false; }
   ledger.accept(hash); acknowledge(id, false);
 }
 void beginSetup() {
@@ -420,21 +473,49 @@ void wirelessAdvance() {
   if (hold) {
     if (!planner.movesPlanned() && !paused) {
       heldPen = servos[0].read();
-      motor.setPenAngle(PEN_UP_ANGLE); servos[0].update();
+      motor.setPenAngle(wallPenUpAngle()); servos[0].update();
       paused = true; penSettling = restoring = false;
       status();
     }
     return;
   }
   if (restoring) {
+    if (servos[0].moving()) { settleUntil=millis()+300; return; }
     if (int32_t(millis() - settleUntil) < 0) return;
     restoring = false;
   }
   if (!count) return;
   Command &cmd = queue[head];
+  if (!strcmp(cmd.op,"cal_begin") || !strcmp(cmd.op,"cal_jog") || !strcmp(cmd.op,"cal_apply")) {
+    if (planner.movesPlanned()) return;
+    dispatching=true;
+    bool ok=false;
+    if (!strcmp(cmd.op,"cal_begin")) {
+      ok=wallCalibrationBegin();
+      if (ok) { hold=paused=false; heldPen=wallPenUpAngle(); lastError=""; }
+    } else if (!strcmp(cmd.op,"cal_jog")) ok=wallCalibrationJog(cmd.axis,cmd.steps);
+    else {
+      ok=wallSetUserReference(cmd.width,cmd.left,cmd.right,cmd.bounds,cmd.calibrationId);
+      if (ok) { hold=paused=false; heldPen=wallPenUpAngle(); lastError=""; }
+    }
+    dispatching=false;
+    if (!ok) { lastError="calibration_failed"; wallInvalidatePosition(); requestHold(); }
+    if (wallStopped() || !count) return;
+    lastDispatched=cmd.id; head=(head+1)%queueCapacity; --count;
+    ledger.finish(lastDispatched); status(); return;
+  }
   if (penSettling) {
+    if (servos[0].moving()) { settleUntil=millis()+300; return; }
     if (int32_t(millis() - settleUntil) < 0) return;
     penSettling = false;
+  } else if (!strcmp(cmd.op,"cal_pen") || !strcmp(cmd.op,"pen_config") || !strcmp(cmd.op,"pen_end")) {
+    if (planner.movesPlanned()) return;
+    if (!strcmp(cmd.op,"pen_config")) {
+      if (!wallSavePenAngles(cmd.penUp,cmd.penDown)) { lastError="pen_save_failed";requestHold();return; }
+    }
+    wallSetPenTuning(!strcmp(cmd.op,"cal_pen"));
+    motor.setPenAngle(!strcmp(cmd.op,"cal_pen") ? cmd.angle : wallPenUpAngle());servos[0].update();
+    penSettling=true;settleUntil=millis()+300;return;
   } else if (!strcmp(cmd.op, "pen")) {
     if (planner.movesPlanned()) return;
     motor.setPenAngle(cmd.angle); servos[0].update();

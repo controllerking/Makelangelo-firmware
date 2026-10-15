@@ -16,19 +16,27 @@ Use the GPIO number printed on the board, not the physical header position. With
 
 | Connection | ESP32 GPIO | Other end |
 | --- | --- | --- |
-| Left STEP | 26 | left driver STEP |
-| Left DIR | 27 | left driver DIR |
-| Left enable | 25 | left driver EN/ENN |
+| Left STEP | 18 | left driver STEP |
+| Left DIR | 19 | left driver DIR |
+| Left enable | 23 | left driver EN/ENN |
 | Left switch | 32 | left switch NC; COM to GND |
-| Right STEP | 18 | right driver STEP |
-| Right DIR | 19 | right driver DIR |
-| Right enable | 23 | right driver EN/ENN |
+| Right STEP | 26 | right driver STEP |
+| Right DIR | 27 | right driver DIR |
+| Right enable | 25 | right driver EN/ENN |
 | Right switch | 33 | right switch NC; COM to GND |
 | Pen signal | 21 | servo signal |
 | Driver logic supply | 3V3 | both drivers VIO/VDD logic pins |
 | Logic ground | GND | driver grounds, switch COM, buck negative, servo ground |
 
 Fit a **10 kΩ pull-up from each EN pin to 3.3 V**, so the drivers stay disabled through reset before firmware runs. Fit an external 4.7–10 kΩ pull-up from each switch GPIO to 3.3 V for the long switch harnesses; internal pull-ups are also enabled. An intact released NC switch reads 0; an actuated switch or broken wire reads 1. Use COM and NC, leaving NO unused.
+
+2026-10-14 prototype correction: left/right mean facing the drawing. Motor
+channels were swapped in firmware to match the actual wiring, and the physical
+left motor uses `MOTOR_0_DIR_INVERT=1`; right remains non-inverted. Positive
+payout therefore drives left DIR HIGH and right DIR LOW. This applies to raw
+jogs, calibration, planner moves and logical homing directions. Restart any
+in-progress calibration after this correction; do not reuse captures from the
+old channel assignment.
 
 These GPIO choices avoid classic ESP32 strapping and flash pins. GPIO16/17 are left available for a possible later UART connection. See the [Espressif GPIO reference](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/peripherals/gpio.html).
 
@@ -63,7 +71,7 @@ Use the actual USB serial port reported by PlatformIO. If pio is not on PATH on 
 1. Begin with belts removed and the pen mechanism unloaded. Boot should leave motors disabled and command pen-up. Use M114 to inspect UNKNOWN position and the switch states.
 2. Press/release each switch and unplug each harness. Released = 0, pressed/disconnected = 1. Correct this before motion.
 3. M17 energizes motors. M18 releases them and invalidates position. Check current and temperature.
-4. D0 X80 jogs the left motor 80 pulses; D0 Y80 does the right. A positive jog drives DIR low and must increase the gondola-side belt length. D0 X-80 / Y-80 reverses it. The command is a deliberate commissioning jog available before homing, limited to 3,200 pulses per axis and does not establish position.
+4. D0 X80 jogs the left motor 80 pulses; D0 Y80 does the right. A positive jog must increase the gondola-side belt length (left DIR HIGH, right DIR LOW with the current inversion settings). D0 X-80 / Y-80 reverses it. The command is a deliberate commissioning jog available before homing, limited to 3,200 pulses per axis and does not establish position.
 5. If a motor's positive jog shortens the gondola-side belt, power off and reverse one coil's leads to normalize it. Do not compensate only the homing direction: drawing and homing must agree.
 6. Check servo operation with M280 P0 S90 (initial pen-up angle) and S40 (initial pen-down angle). Mechanically unload the linkage first and calibrate for 3–5 mm clearance. M280 also accepts microsecond pulses above 500, clamped to the configured safe pulse range.
 7. M112 stops queued/current motion, disables drivers, commands pen-up, and latches a fault until hardware reset. It is handled as soon as a complete serial line arrives, including during homing/planner waits. Keep a physical power switch accessible: serial delivery is not a hardware emergency-stop circuit.

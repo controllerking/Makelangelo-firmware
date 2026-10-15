@@ -920,7 +920,7 @@ void Stepper::setup() {
 #ifdef TARGET_ESP32
     digitalWrite(motors[i].enable_pin, HIGH);
     digitalWrite(motors[i].step_pin, LOW);
-    digitalWrite(motors[i].dir_pin, LOW);
+    digitalWrite(motors[i].dir_pin, esp32MotorDirectionLevel(i, LOW));
 #endif
     pinMode(motors[i].step_pin, OUTPUT);
     pinMode(motors[i].dir_pin, OUTPUT);
@@ -950,7 +950,8 @@ void Stepper::setup() {
   pinMode(SERVO0_PIN, OUTPUT);
 #  else
 #ifdef TARGET_ESP32
-  servos[0].write(PEN_UP_ANGLE);
+  wallLoadPenAngles();
+  servos[0].write(wallPenUpAngle());
 #endif
   servos[0].attach(SERVO0_PIN);
 #  endif  // ESP8266
@@ -1419,16 +1420,22 @@ void Stepper::isr() {
 
 void Stepper::setDirections(uint16_t bits) {
   directionBits = bits;
+#ifdef TARGET_ESP32
+#define STEP_DIR_LEVEL(NN, LEVEL) esp32MotorDirectionLevel(NN, LEVEL)
+#else
+#define STEP_DIR_LEVEL(NN, LEVEL) LEVEL
+#endif
 #define SET_STEP_DIR(NN) \
   if(!!(directionBits&(1UL<<NN))) { \
-    digitalWrite(MOTOR_##NN##_DIR_PIN, STEPPER_DIR_HIGH); \
+    digitalWrite(MOTOR_##NN##_DIR_PIN, STEP_DIR_LEVEL(NN, STEPPER_DIR_HIGH)); \
     global_step_dir_##NN = 1; \
   } else { \
-    digitalWrite(MOTOR_##NN##_DIR_PIN, STEPPER_DIR_LOW); \
+    digitalWrite(MOTOR_##NN##_DIR_PIN, STEP_DIR_LEVEL(NN, STEPPER_DIR_LOW)); \
     global_step_dir_##NN = -1; \
   }
 
   ALL_MOTOR_MACRO(SET_STEP_DIR);
+#undef STEP_DIR_LEVEL
 
 #if NUM_SERVOS > 0
   global_servoStep_dir_0 = (!!(bits&(1<<NUM_MOTORS))) ? -1 : 1;

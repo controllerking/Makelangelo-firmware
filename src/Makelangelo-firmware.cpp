@@ -197,7 +197,13 @@ void setup() {
   for (ALL_AXIES(i)) pos[i] = 0;
 
 #ifdef MACHINE_HAS_LIFTABLE_PEN
-  if (NUM_AXIES >= 3) pos[2] = PEN_UP_ANGLE;
+  if (NUM_AXIES >= 3) {
+#ifdef TARGET_ESP32
+    pos[2] = wallPenUpAngle();
+#else
+    pos[2] = PEN_UP_ANGLE;
+#endif
+  }
 #endif
 
   teleport(pos);

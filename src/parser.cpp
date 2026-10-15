@@ -320,7 +320,7 @@ void Parser::processCommand() {
       SERIAL_ECHOLNPGM("Raw GPIO commands disabled on wall machine.");
       return;
     }
-    if (cmd == 500 && wallManualReference()) {
+    if (cmd == 500 && (wallManualReference() || wallUserReference())) {
       SERIAL_ECHOLNPGM("M500 blocked: temporary manual geometry must not be saved.");
       return;
     }
@@ -456,7 +456,7 @@ void Parser::D0() {
       SERIAL_ECHOLNPGM("D0 rejected: maximum 3200 steps per axis.");
       return;
     }
-    digitalWrite(motors[i].dir_pin, amount < 0 ? HIGH : LOW);
+    digitalWrite(motors[i].dir_pin, esp32MotorDirectionLevel(i, amount < 0));
     for (int j = 0; j < abs(amount); ++j) {
       meanwhile();
       if (wallStopped()) return;
@@ -1027,7 +1027,7 @@ void Parser::M114() {
 
   SERIAL_EOL();
 #ifdef TARGET_ESP32
-  SERIAL_ECHOPAIR("Position ", wallManualReference() ? "MANUAL" : (wallPositionKnown() ? "HOMED" : "UNKNOWN"));
+  SERIAL_ECHOPAIR("Position ", wallUserReference() ? "USER CALIBRATED" : (wallManualReference() ? "MANUAL" : (wallPositionKnown() ? "HOMED" : "UNKNOWN")));
   SERIAL_ECHOPAIR(" Stop ", wallStopped() ? "LATCHED" : "CLEAR");
   if (wallHardwareReady()) {
     SERIAL_ECHOPAIR(" Switch L ", digitalRead(LIMIT_SWITCH_PIN_LEFT));
