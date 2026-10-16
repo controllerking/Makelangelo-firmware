@@ -1,5 +1,17 @@
 # Development Progress Log
 
+## 2026-10-16 — Crosshatch image style (numpy, optional)
+
+- New `image_mode: crosshatch`: up to four line directions (45/135/0/90 deg)
+  switching on at rising darkness, each line a two-point run, short gaps drawn
+  through, adjacent line ends joined, line pitch widened automatically if the
+  stroke cap (800/2000/4000) would be exceeded. Written independently; the
+  Twarner491/polargraph repo has no license, so none of its code was used.
+- Trade-off measured on a synthetic picture (18x24, balanced): 725 strokes but
+  ~123 m of line (about 3.4 h at 10 mm/s) vs Wavy line 49 strokes and ~31 m.
+- A stipple/TSP-tour style was prototyped and dropped: a nearest-neighbour tour
+  looked worse than the existing styles; it would need a proper tour optimiser.
+
 ## 2026-10-16 — Wavy line image style (numpy, optional)
 
 - New `image_mode: wave`: one continuous boustrophedon line per row, swing and

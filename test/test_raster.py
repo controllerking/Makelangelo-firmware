@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import math
 from pathlib import Path
 import tempfile
 import unittest
@@ -101,6 +102,21 @@ class WaveTests(unittest.TestCase):
         light = [abs(y-round(y)) for p in paths for x,y in p if x > w*.6]
         self.assertGreater(len(dark),0)
         self.assertGreater(len(dark),3*len(light))               # light half is mostly unmarked
+
+    def test_crosshatch_layers_follow_tone_with_few_strokes(self):
+        w,h = 96,96
+        tones = (40,110,170)   # dark, mid, light thirds (left to right)
+        pixels = bytes(tones[x*3//w] for y in range(h) for x in range(w))
+        data = {"width":w,"height":h,"pixels":base64.b64encode(pixels).decode()}
+        paths,_,meta,_ = raster_paths(data,dict(OPTIONS,image_mode="crosshatch",quality="balanced"))
+        self.assertEqual(meta["image_mode"],"crosshatch")
+        self.assertLessEqual(len(paths),PRESETS["balanced"]["hatch_strokes"])
+        def ink(lo,hi): return sum(math.dist(p[i],p[i+1]) for p in paths for i in range(len(p)-1)
+                                   if lo <= (p[i][0]+p[i+1][0])/2 < hi)
+        dark,mid,light = ink(0,32),ink(32,64),ink(64,96)
+        self.assertGreater(dark,mid); self.assertGreater(mid,light)
+        job,_,_ = self.convert(image(value=0),image_mode="crosshatch",quality="detailed")
+        self.assertLessEqual(job["command_count"],65536)
 
     def test_wave_strokes_far_fewer_than_hatching(self):
         data = image(value=100)

@@ -15,13 +15,13 @@ from .artwork import MAX_POINTS, PAPER, finite, distance_line
 
 PRESETS = {
     "fast": {"label": "Fast", "resolution": 256, "spacing": 1.8, "strokes": 3000,
-             "sample": 1.2, "tolerance": .4, "feed": 15, "wave_points": 15000,
+             "sample": 1.2, "tolerance": .4, "feed": 15, "wave_points": 15000, "hatch_pitch": 3., "hatch_strokes": 800,
              "description": "Fewer lines, bolder shapes, shorter plots."},
     "balanced": {"label": "Balanced", "resolution": 512, "spacing": 1., "strokes": 7000,
-                 "sample": .75, "tolerance": .2, "feed": 10, "wave_points": 35000,
+                 "sample": .75, "tolerance": .2, "feed": 10, "wave_points": 35000, "hatch_pitch": 2., "hatch_strokes": 2000,
                  "description": "A practical balance of detail and drawing time."},
     "detailed": {"label": "Detailed", "resolution": 768, "spacing": .5, "strokes": 14000,
-                 "sample": .45, "tolerance": .1, "feed": 6, "wave_points": 55000,
+                 "sample": .45, "tolerance": .1, "feed": 6, "wave_points": 55000, "hatch_pitch": 1.4, "hatch_strokes": 4000,
                  "description": "Denser shading and finer outlines; longer plots."},
 }
 MAX_DIMENSION = 768
@@ -62,6 +62,74 @@ def box_blur(a, k):
     return a
 
 
+def tone(w, h, pixels):
+    """Darkness 0..1 with the picture's own tonal range stretched to fill it."""
+    dark = 1.-np.frombuffer(pixels, np.uint8).reshape(h, w).astype(np.float64)/255.
+    lo, hi = np.percentile(dark, (2, 98))
+    return np.clip((dark-lo)/(hi-lo), 0., 1.) if hi-lo > .05 else dark
+
+
+HATCH_ANGLES = (math.radians(45), math.radians(135), 0., math.pi/2)
+HATCH_LEVELS = (.12, .32, .52, .72)   # darkness at which each layer switches on
+
+
+def hatch_layers(dark, w, h, scale, pitch):
+    """Straight lines in up to four directions; darker tone gets more layers.
+
+    A run is only two points. Short gaps are drawn through and neighbouring line
+    ends are joined, so the pen lifts far less than with per-cell dashes.
+    """
+    pitch_px = pitch/scale
+    step = max(1., pitch_px/2)
+    gap = math.ceil(3*pitch_px/step)
+    paths = []
+    for layer, (theta, level) in enumerate(zip(HATCH_ANGLES, HATCH_LEVELS)):
+        if dark.max() <= level: continue
+        ux, uy, vx, vy = math.cos(theta), math.sin(theta), -math.sin(theta), math.cos(theta)
+        offsets = [cx*vx+cy*vy for cx, cy in ((0, 0), (w, 0), (w, h), (0, h))]
+        s = min(offsets)+(layer%2)*pitch_px/2
+        line = 0
+        while s <= max(offsets):
+            t0, t1 = -1e18, 1e18
+            for origin, direction, hi in ((s*vx, ux, w), (s*vy, uy, h)):
+                if abs(direction) < 1e-12:
+                    if not 0 <= origin <= hi: t0, t1 = 1., 0.
+                else:
+                    a, b = sorted(((0-origin)/direction, (hi-origin)/direction))
+                    t0, t1 = max(t0, a), min(t1, b)
+            if t1-t0 >= step:
+                ts = np.linspace(t0, t1, int((t1-t0)/step)+1)
+                xs, ys = s*vx+ts*ux, s*vy+ts*uy
+                inked = dark[np.clip(ys.astype(int), 0, h-1), np.clip(xs.astype(int), 0, w-1)] > level
+                if line%2: xs, ys, inked = xs[::-1], ys[::-1], inked[::-1]
+                edges = np.diff(np.concatenate([[0], inked.astype(np.int8), [0]]))
+                runs = []
+                for a, b in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)-1):
+                    if runs and a-runs[-1][1] <= gap: runs[-1][1] = b
+                    else: runs.append([a, b])
+                for a, b in runs:
+                    if b-a < 1 or math.dist((xs[a], ys[a]), (xs[b], ys[b])) < pitch_px: continue
+                    seg = [(float(xs[a]), float(ys[a])), (float(xs[b]), float(ys[b]))]
+                    if paths and paths[-1][1] == layer and math.dist(paths[-1][0][-1], seg[0]) <= 1.6*pitch_px:
+                        paths[-1][0].extend(seg)
+                    else: paths.append([seg, layer])
+            s += pitch_px
+            line += 1
+    return [p for p, _ in paths]
+
+
+def hatch_paths(w, h, pixels, scale, config):
+    if np is None:
+        raise ValueError("Crosshatch style needs numpy on the controller (apt install python3-numpy)")
+    pitch = config["hatch_pitch"]
+    for _ in range(8):
+        dark = box_blur(tone(w, h, pixels), max(1, round(pitch/scale/2)))
+        paths = hatch_layers(dark, w, h, scale, pitch)
+        if len(paths) <= config["hatch_strokes"]: return paths
+        pitch *= 1.3   # too many pen lifts: widen the line spacing and retry
+    raise ValueError("Crosshatch needs too many pen lifts; choose Fast or smaller paper")
+
+
 def wave_paths(w, h, pixels, scale, config):
     """Continuous rows whose swing grows with darkness: few pen lifts, smooth motion.
 
@@ -72,9 +140,7 @@ def wave_paths(w, h, pixels, scale, config):
     if np is None:
         raise ValueError("Wavy line style needs numpy on the controller (apt install python3-numpy)")
     per_period = 8
-    dark = 1.-np.frombuffer(pixels, np.uint8).reshape(h, w).astype(np.float64)/255.
-    lo, hi = np.percentile(dark, (2, 98))
-    if hi-lo > .05: dark = np.clip((dark-lo)/(hi-lo), 0., 1.)  # use the full tonal range
+    dark = tone(w, h, pixels)
     width_mm, height_mm = w*scale, h*scale
     pitch = max(1.5, math.sqrt(width_mm*height_mm*per_period/config["wave_points"]))
     rows = max(2, int(height_mm/pitch))
@@ -222,6 +288,8 @@ def raster_paths(image, options):
     elif mode == "wave":
         paths = wave_paths(w, h, pixels, scale, config)
         if sum(map(len, paths)) > 95_000: raise ValueError("Wavy lines need too many points; choose Fast or smaller paper")
+    elif mode == "crosshatch":
+        paths = hatch_paths(w, h, pixels, scale, config)
     else: raise ValueError("Unknown image conversion style")
     if not paths: raise ValueError("No drawable marks found; try another style or adjust the outline threshold")
     warnings = ["Image converted to monochrome pen strokes. A working pen-lift servo is required.",

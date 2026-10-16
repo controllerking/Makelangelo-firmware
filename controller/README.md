@@ -102,6 +102,12 @@ from the paper size so the job fits the robot's stored-plot budget (worst case
 ~54.6k of 65.5k commands). A photo needs tens of strokes instead of thousands,
 so almost no pen lifts. The pen lifts only across near-white areas.
 
+Choose **Crosshatch** (needs numpy) for the best shading: straight lines in up to four
+directions, with more layers where the picture is darker. Short gaps are drawn
+through and line ends joined, so it makes hundreds of strokes rather than
+thousands, but it lays down a lot of line, so dark pictures take much longer than
+Wavy line (hours at 10 mm/s on large paper); raise the feed once calibrated.
+
 Choose **Shaded hatching** for illustrations, or if numpy is unavailable: monochrome horizontal strokes
 approximate tonal shading, alternating direction to reduce travel. Choose
 **Silhouette outlines** for logos/dark shapes: traces thresholded regions,
