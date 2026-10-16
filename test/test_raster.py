@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 from controller.artwork import prepare
-from controller.raster import decode_gray, raster_paths, simplify, PRESETS
+from controller.raster import decode_gray, raster_paths, simplify, PRESETS, np as raster_np
 from controller.server import Controller
 
 OPTIONS = {"paper":"Letter", "left":100, "top":-100, "margin":20}
@@ -76,6 +76,37 @@ class RasterTests(unittest.TestCase):
     def test_preset_bounds_actual_resolution(self):
         _,_,metadata,_=raster_paths(image(600,400),dict(OPTIONS,quality="fast"))
         self.assertEqual(max(metadata["image_size"]),256)
+
+
+@unittest.skipIf(raster_np is None, "numpy not installed")
+class WaveTests(unittest.TestCase):
+    convert = RasterTests.convert
+
+    def test_wave_is_continuous_and_budgeted(self):
+        for key,cfg in PRESETS.items():
+            paths,warnings,meta,bounds = raster_paths(image(value=0),dict(OPTIONS,image_mode="wave",quality=key))
+            self.assertEqual(len(paths),1)                       # black image: one unbroken line
+            self.assertLessEqual(sum(map(len,paths)),cfg["wave_points"]*1.1)
+            self.assertEqual(meta["image_mode"],"wave")
+            job,_,_ = self.convert(image(value=0),image_mode="wave",quality=key)
+            self.assertLessEqual(job["command_count"],65536)
+
+    def test_wave_swings_more_where_darker_and_skips_white(self):
+        with self.assertRaises(ValueError): raster_paths(image(value=255),dict(OPTIONS,image_mode="wave"))
+        w,h = 64,64
+        pixels = bytes(30 if x < w//2 else 200 for y in range(h) for x in range(w))
+        data = {"width":w,"height":h,"pixels":base64.b64encode(pixels).decode()}
+        paths,_,_,_ = raster_paths(data,dict(OPTIONS,image_mode="wave"))
+        dark = [abs(y-round(y)) for p in paths for x,y in p if x < w*.4]
+        light = [abs(y-round(y)) for p in paths for x,y in p if x > w*.6]
+        self.assertGreater(len(dark),0)
+        self.assertGreater(len(dark),3*len(light))               # light half is mostly unmarked
+
+    def test_wave_strokes_far_fewer_than_hatching(self):
+        data = image(value=100)
+        wave,_,_,_ = raster_paths(data,dict(OPTIONS,image_mode="wave",quality="balanced"))
+        hatch,_,_,_ = raster_paths(data,dict(OPTIONS,image_mode="hatching",quality="balanced"))
+        self.assertLess(len(wave)*5,len(hatch))
 
 
 class RasterControllerTests(unittest.IsolatedAsyncioTestCase):

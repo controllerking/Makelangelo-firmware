@@ -16,7 +16,7 @@ from .plot import encode_plot
 
 from .artwork import PAPER, demo_paths, prepare, svg_paths, finite
 from .transport import DeviceLink, DeviceError
-from .raster import PRESETS, preset, raster_paths
+from .raster import PRESETS, preset, raster_paths, np as _numpy
 from .config import ENV_FILE, RobotConfig, load_robot_config
 from .calibration import CORNERS, fit, reference_command
 
@@ -108,7 +108,7 @@ class Controller:
                 "simulation":self.simulation,
                 "connection_message":self.connection_message, "active":self.active,
                 "jobs":[self.public_job(j) for j in sorted(self.jobs.values(), key=lambda j:j["created"], reverse=True)],
-                "papers":PAPER, "presets":PRESETS,
+                "papers":PAPER, "presets":PRESETS, "wave_available":_numpy is not None,
                 "calibration":self.calibration,"calibration_draft":self.calibration_draft,
                 "pen_calibration":self.pen_calibration,"pen_draft":self.pen_draft}
 

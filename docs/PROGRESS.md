@@ -1,5 +1,20 @@
 # Development Progress Log
 
+## 2026-10-16 — Wavy line image style (numpy, optional)
+
+- New `image_mode: wave`: one continuous boustrophedon line per row, swing and
+  frequency rising with darkness, percentile contrast stretch, box-blurred tone,
+  pitch derived from paper size and the preset's point budget (15k/35k/55k).
+  Pen lifts only across near-white areas. Default in the UI when numpy is
+  present; the option is disabled (and hatching kept) when it is not.
+- Why: dithered hatching makes 1k-5k separate strokes per photo, each needing a
+  pen lift and servo settle, which the time estimate does not include. On a
+  synthetic test image: balanced hatching 2,545 strokes vs wave 49.
+- Worst case (solid black, every preset, every paper size) is 54,652 commands
+  against the 65,536 the ESP32 can store; asserted in `WaveTests`.
+- numpy is optional (`controller/requirements.txt`); 3 new tests skip without it.
+  Only synthetic images were tried; judge results on a real photo.
+
 ## 2026-10-16 — manual-reference mode removed; restore from any saved corner
 
 - Removed the temporary manual-reference commissioning mode: USB `M665`,

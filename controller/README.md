@@ -4,7 +4,10 @@ This service hosts a private browser interface and prepares artwork on your
 computer. With updated ESP32 firmware it uploads and verifies the complete plot,
 then the device draws independently; the computer is only needed for monitoring
 and remote controls afterward. Older firmware uses connection-dependent
-streaming. Python 3.11+ is required; no third-party Python dependencies.
+streaming. Python 3.11+ is required. The only third-party dependency is
+**numpy**, and it is optional: it enables the **Wavy line** image style
+(`apt install python3-numpy`, or `pip install -r controller/requirements.txt`).
+Without it the Wavy line option is disabled and everything else works.
 
 Stored plots use 16 bytes/command, with a 1 MiB per-file cap and available-space
 checks. The WROOM's existing 4 MiB layout reserves 1,408 KiB for SPIFFS, so no
@@ -93,7 +96,13 @@ update, or original-image storage is needed. The prepared pen paths and job
 metadata are saved locally as before. Original image whitespace/aspect ratio is
 preserved when fitting the paper.
 
-Choose **Shaded hatching** for photos/illustrations: monochrome horizontal strokes
+Choose **Wavy line** for photos (needs numpy): each row is one continuous line
+whose swing grows with darkness, with a contrast stretch and a row pitch chosen
+from the paper size so the job fits the robot's stored-plot budget (worst case
+~54.6k of 65.5k commands). A photo needs tens of strokes instead of thousands,
+so almost no pen lifts. The pen lifts only across near-white areas.
+
+Choose **Shaded hatching** for illustrations, or if numpy is unavailable: monochrome horizontal strokes
 approximate tonal shading, alternating direction to reduce travel. Choose
 **Silhouette outlines** for logos/dark shapes: traces thresholded regions,
 including holes. Its threshold control selects what counts as dark; this is

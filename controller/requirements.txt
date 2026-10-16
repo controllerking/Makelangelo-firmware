@@ -1,0 +1,2 @@
+# Optional: enables the Wavy line image style. Everything else is standard library.
+numpy>=1.26

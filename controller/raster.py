@@ -8,17 +8,20 @@ import base64
 import binascii
 import math
 
+try: import numpy as np  # optional: only the wavy-line style needs it
+except ImportError: np = None
+
 from .artwork import MAX_POINTS, PAPER, finite, distance_line
 
 PRESETS = {
     "fast": {"label": "Fast", "resolution": 256, "spacing": 1.8, "strokes": 3000,
-             "sample": 1.2, "tolerance": .4, "feed": 15,
+             "sample": 1.2, "tolerance": .4, "feed": 15, "wave_points": 15000,
              "description": "Fewer lines, bolder shapes, shorter plots."},
     "balanced": {"label": "Balanced", "resolution": 512, "spacing": 1., "strokes": 7000,
-                 "sample": .75, "tolerance": .2, "feed": 10,
+                 "sample": .75, "tolerance": .2, "feed": 10, "wave_points": 35000,
                  "description": "A practical balance of detail and drawing time."},
     "detailed": {"label": "Detailed", "resolution": 768, "spacing": .5, "strokes": 14000,
-                 "sample": .45, "tolerance": .1, "feed": 6,
+                 "sample": .45, "tolerance": .1, "feed": 6, "wave_points": 55000,
                  "description": "Denser shading and finer outlines; longer plots."},
 }
 MAX_DIMENSION = 768
@@ -44,6 +47,74 @@ def decode_gray(image):
     except (ValueError, binascii.Error): raise ValueError("Invalid image encoding") from None
     if len(pixels) != w*h: raise ValueError("Grayscale pixel count does not match dimensions")
     return w, h, pixels
+
+
+def box_blur(a, k):
+    """Separable box blur with edge padding (numpy cumulative sums)."""
+    if k <= 1: return a
+    pad = k//2
+    for axis in (0, 1):
+        n = a.shape[axis]
+        spec = [(pad, k-1-pad) if i == axis else (0, 0) for i in range(2)]
+        c = np.cumsum(np.pad(a, spec, mode="edge"), axis=axis)
+        c = np.concatenate([np.zeros_like(np.take(c, [0], axis=axis)), c], axis=axis)
+        a = (np.take(c, range(k, k+n), axis=axis) - np.take(c, range(0, n), axis=axis))/k
+    return a
+
+
+def wave_paths(w, h, pixels, scale, config):
+    """Continuous rows whose swing grows with darkness: few pen lifts, smooth motion.
+
+    Row pitch is chosen from the paper size so the whole plot fits the preset's
+    point budget (the robot stores about 65k commands per job). Rows are chained
+    boustrophedon-style; the pen only lifts across near-white areas.
+    """
+    if np is None:
+        raise ValueError("Wavy line style needs numpy on the controller (apt install python3-numpy)")
+    per_period = 8
+    dark = 1.-np.frombuffer(pixels, np.uint8).reshape(h, w).astype(np.float64)/255.
+    lo, hi = np.percentile(dark, (2, 98))
+    if hi-lo > .05: dark = np.clip((dark-lo)/(hi-lo), 0., 1.)  # use the full tonal range
+    width_mm, height_mm = w*scale, h*scale
+    pitch = max(1.5, math.sqrt(width_mm*height_mm*per_period/config["wave_points"]))
+    rows = max(2, int(height_mm/pitch))
+    pitch = height_mm/rows
+    dark = box_blur(dark, max(1, round(pitch/scale)))
+    step = pitch/per_period                      # mm between samples along a row
+    count = max(2, math.ceil(width_mm/step)+1)
+    xs = np.linspace(0., float(w), count)
+    cols = np.clip(xs.astype(int), 0, w-1)
+    swing = .6*pitch/scale                       # peak amplitude in image pixels
+    paths, current, chained = [], [], False
+    def flush():
+        nonlocal current
+        if len(current) >= 3: paths.append(current)
+        current = []
+    for r in range(rows):
+        y0 = (r+.5)*h/rows
+        d = dark[min(h-1, int(y0)), cols]
+        phase = np.concatenate([[0.], np.cumsum(2*math.pi*(1.+.6*d[1:])/per_period)])
+        ys = np.clip(y0+swing*d*np.sin(phase), 0., float(h))
+        px, py, inked = xs, ys, d >= .03
+        if r%2: px, py, inked = px[::-1], py[::-1], inked[::-1]
+        index = 0
+        while index < count:
+            if not inked[index]:
+                index += 1
+                continue
+            end = index
+            while end < count and inked[end]: end += 1
+            run = list(zip(px[index:end].tolist(), py[index:end].tolist()))
+            if index == 0 and chained: current.extend(run)   # continue from previous row end
+            else:
+                flush(); current = run
+            if end < count: flush()
+            chained = end == count
+            index = end
+        else:
+            if not (inked[-1] if count else False): chained = False
+    flush()
+    return paths
 
 
 def simplify(path, tolerance):
@@ -148,6 +219,9 @@ def raster_paths(image, options):
             # Alternate direction to reduce pen-up travel across the page.
             paths.extend([list(reversed(p)) for p in reversed(runs)] if row%2 else runs)
             if len(paths)*6 > 95_000: raise ValueError("Image needs too many pen lifts; choose Fast or smaller paper")
+    elif mode == "wave":
+        paths = wave_paths(w, h, pixels, scale, config)
+        if sum(map(len, paths)) > 95_000: raise ValueError("Wavy lines need too many points; choose Fast or smaller paper")
     else: raise ValueError("Unknown image conversion style")
     if not paths: raise ValueError("No drawable marks found; try another style or adjust the outline threshold")
     warnings = ["Image converted to monochrome pen strokes. A working pen-lift servo is required.",

@@ -4,6 +4,7 @@ let snapshot = {connected:false,device:{},jobs:[]}, selected = null, artwork = n
 let toastTimer, statusBusy = false, preparing = false, revision = 0;
 let calibrationBusy=false, appliedCalibration=null, appliedPen=null, displayedPenAngle=null;
 let speedBusy=false,speedDirty=false,speedBoot=null;
+let waveChecked=false;
 const cornerNames=['top_left','top_right','bottom_right','bottom_left'];
 let currentPage=null,initialPageChosen=false;
 let monitoredJobId=null,startBusy=false;
@@ -128,6 +129,11 @@ function renderCalibration() {
   const ready=snapshot.connected && d.calibration_api===1 && !d.fault && !snapshot.active;
   const valid=draft && draft.boot===d.boot && d.calibrating;
   const idle=ready && !calibrationBusy && !d.busy && !d.moving;
+  if(!waveChecked && snapshot.papers){
+    waveChecked=true;const wave=$('wave-option');
+    if(snapshot.wave_available)$('image-mode').value='wave';
+    else{wave.disabled=true;wave.textContent='Wavy line · unavailable (install python3-numpy on the controller)';$('image-mode').value='hatching';}
+  }
   if($('cal-paper').options.length===1 && snapshot.papers){
     $('cal-paper').replaceChildren(...Object.keys(snapshot.papers).map(name=>{
       const o=document.createElement('option');o.value=name;o.textContent=name;return o;
