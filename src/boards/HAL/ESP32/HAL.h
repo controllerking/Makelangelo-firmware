@@ -25,8 +25,8 @@ extern portMUX_TYPE stepperMux;
 #define STEPPER_ISR_ENABLED() HAL_timer_interrupt_enabled(0)
 #define ENABLE_ISRS() HAL_timer_enable_interrupt(0)
 #define DISABLE_ISRS() HAL_timer_disable_interrupt(0)
-#define HAL_STEP_TIMER_ISR() void Step_Handler()
-extern void Step_Handler();
+#define HAL_STEP_TIMER_ISR() void IRAM_ATTR Step_Handler()
+extern void IRAM_ATTR Step_Handler();
 extern void HAL_init();
 extern bool HAL_storage_ready();
 extern void HAL_timer_start(uint8_t);
@@ -34,6 +34,6 @@ extern void HAL_timer_enable_interrupt(uint8_t);
 extern void HAL_timer_disable_interrupt(uint8_t);
 extern bool HAL_timer_interrupt_enabled(uint8_t);
 extern bool HAL_timer_initialized(uint8_t);
-extern void HAL_timer_set_compare(uint8_t, hal_timer_t);
-extern hal_timer_t HAL_timer_get_count(uint8_t);
+extern void IRAM_ATTR HAL_timer_set_compare(uint8_t, hal_timer_t);
+extern hal_timer_t IRAM_ATTR HAL_timer_get_count(uint8_t);
 #endif

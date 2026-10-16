@@ -192,7 +192,7 @@ def length(value, default=0):
     return finite(match[1])*scale[match[2]]
 
 
-def svg_paths(svg):
+def svg_paths(svg, tolerance=None):
     if len(svg.encode("utf-8")) > 2_000_000:
         raise ValueError("SVG limit is 2 MB")
     if re.search(r"<!\s*(DOCTYPE|ENTITY)", svg, re.I):
@@ -204,9 +204,13 @@ def svg_paths(svg):
     if len(nodes) > 10000: raise ValueError("SVG has too many elements")
     ids = {n.get("id"): n for n in nodes if n.get("id")}
     viewbox = [finite(v) for v in re.findall(NUMBER, root.get("viewBox", ""))]
-    tolerance = max(.01, max(viewbox[2:], default=400)/2500)
+    if tolerance is None:
+        tolerance = max(.01, max(viewbox[2:], default=400)/2500)
+    tolerance = max(1e-9, finite(tolerance,"curve tolerance"))
     paths, warnings = [], set()
+    point_count = 0
     def visit(node, parent, depth=0, references=()):
+        nonlocal point_count
         if depth > 40: raise ValueError("SVG nesting/reference limit exceeded")
         kind = node.tag.split("}")[-1]
         style = node.get("style", "")
@@ -261,8 +265,10 @@ def svg_paths(svg):
             warnings.add(f"Ignored unsupported SVG element: {kind}")
             return
         for path in local:
-            if len(path) > 1: paths.append([point(matrix, p) for p in path])
-        if sum(map(len, paths)) > MAX_POINTS: raise ValueError("Artwork has too many points")
+            if len(path) > 1:
+                paths.append([point(matrix, p) for p in path])
+                point_count += len(path)
+        if point_count > MAX_POINTS: raise ValueError("Artwork has too many points")
         for child in node:
             visit(child, matrix, depth+1, references)
     visit(root, IDENTITY)
@@ -316,42 +322,71 @@ def prepare(paths, options, pen_up=90, pen_down=40, source_bounds=None):
         for path in placed:
             result = [warp(path[0])]
             for a,b in zip(path,path[1:]):
-                # Bilinear placement can curve a diagonal. Subdivide first.
-                n = max(1,math.ceil(math.dist(a,b)/5))
-                if point_count+len(result)+n>MAX_POINTS: raise ValueError("Too many transformed drawing points")
-                result.extend(warp((a[0]+(b[0]-a[0])*i/n,a[1]+(b[1]-a[1])*i/n)) for i in range(1,n+1))
+                # Bilinear curvature has its maximum chord error at the midpoint.
+                stack=[(a,b,0)]
+                while stack:
+                    start,end,depth=stack.pop()
+                    mid=((start[0]+end[0])/2,(start[1]+end[1])/2)
+                    ws,we,wm=warp(start),warp(end),warp(mid)
+                    error=math.dist(wm,((ws[0]+we[0])/2,(ws[1]+we[1])/2))
+                    if error>.025 and depth<16:
+                        stack.extend(((mid,end,depth+1),(start,mid,depth+1)))
+                    else:
+                        if error>.025: raise ValueError("Paper warp exceeds subdivision tolerance")
+                        result.append(we)
+                    if point_count+len(result)+len(stack)>MAX_POINTS:
+                        raise ValueError("Too many transformed drawing points")
             warped.append(result)
             point_count += len(result)
         placed = warped
         xmin,xmax = min(p[0] for p in corners),max(p[0] for p in corners)
         ymin,ymax = min(p[1] for p in corners),max(p[1] for p in corners)
         paper_rect = [xmin,ymax,xmax-xmin,ymax-ymin]
-    commands, seconds, drawn, travel = [], 0., 0., 0.
-    previous = None
+    from .toolpath import simplify, route, estimate
+    pen_width = finite(options.get("pen_width", .3), "pen width")
+    minimum = finite(options.get("minimum_mark", 0), "minimum mark length")
+    tolerance = finite(options.get("path_tolerance", .02), "path tolerance")
+    travel_feed = finite(options.get("travel_feed", feed), "travel feed")
+    if not .05 <= pen_width <= 3 or not 0 <= minimum <= 5 or not 0 <= tolerance <= .5:
+        raise ValueError("Pen width, minimum mark or path tolerance is out of range")
+    if not .1 <= travel_feed <= 30: raise ValueError("Travel feed must be 0.1–30 mm/s")
+    cleaned = []
     for path in placed:
         clean = [path[0]]
-        for p in path[1:]:
-            if math.dist(p, clean[-1]) >= .02: clean.append(p)
+        clean.extend(p for i,p in enumerate(path[1:],1) if p != path[i-1])
+        clean = simplify(clean, min(tolerance, pen_width/4))
+        if len(clean)>1 and sum(math.dist(a,b) for a,b in zip(clean,clean[1:])) >= minimum:
+            cleaned.append(clean)
+    placed = route(cleaned, options.get("optimize_travel", False) is True)
+    commands, drawn, travel = [], 0., 0.
+    previous = None
+    for path in placed:
+        clean = path
         if len(clean) < 2: continue
-        commands.append({"op":"pen","angle":pen_up,"role":"up"})
-        commands.append({"op":"move","x":clean[0][0],"y":clean[0][1],"feed":feed})
+        if not commands:
+            commands.append({"op":"pen","angle":pen_up,"role":"up"})
+        commands.append({"op":"move","x":clean[0][0],"y":clean[0][1],"feed":travel_feed})
         if previous is not None: travel += math.dist(previous, clean[0])
         commands.append({"op":"pen","angle":pen_down,"role":"down"})
         for a,b in zip(clean, clean[1:]):
             drawn += math.dist(a,b)
             commands.append({"op":"move","x":b[0],"y":b[1],"feed":feed})
         commands.append({"op":"pen","angle":pen_up,"role":"up"})
-        previous = clean[-1]; seconds += .9
+        previous = clean[-1]
     commands.append({"op":"sync"})
     if len(commands) == 1: raise ValueError("Artwork contains no nonzero drawing paths")
-    if len(commands) > 100_000: raise ValueError("Job too large; simplify the SVG")
-    seconds += (drawn+travel)/feed
-    return {"commands":commands, "paths":placed, "paper":paper,
+    if len(commands) > 4*MAX_POINTS+1: raise ValueError("Job too large; simplify the SVG")
+    servo_speed=finite(options.get("servo_speed",35),"servo speed")
+    if not 5<=servo_speed<=120: raise ValueError("Servo speed must be 5–120 degrees/second")
+    timing = estimate(commands, pen_up, pen_down, servo_speed)
+    return {**timing, "travel_mm":round(travel), "path_count":len(placed),
+            "pen_width":pen_width, "minimum_mark":minimum, "path_tolerance":tolerance,
+            "travel_feed":travel_feed, "optimize_travel":options.get("optimize_travel",False) is True,"commands":commands, "paths":placed, "paper":paper,
             "pen_up":pen_up, "pen_down":pen_down,
             "paper_rect":paper_rect, "paper_corners":corners, "paper_size":[pw,ph], "margin":margin,
             "bounds":[min(p[0] for path in placed for p in path),
                       min(p[1] for path in placed for p in path),
                       max(p[0] for path in placed for p in path),
                       max(p[1] for path in placed for p in path)],
-            "estimated_seconds":round(seconds), "drawn_mm":round(drawn),
+            "drawn_mm":round(drawn),
             "command_count":len(commands)}

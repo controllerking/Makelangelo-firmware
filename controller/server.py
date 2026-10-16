@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 import uuid
 import base64
 from .plot import encode_plot
+from .plot_segments import part_identity, execution_parts
 
 from .artwork import PAPER, demo_paths, prepare, svg_paths, finite
 from .transport import DeviceLink, DeviceError
@@ -47,16 +48,18 @@ class Controller:
         self.connection_message = "Connecting automatically"
         self.link = DeviceLink(self.config["session"], self.disconnected)
         self.jobs = {}
+        self.persisted_states = {}
         if (self.data_dir/"jobs").exists():
             for path in (self.data_dir/"jobs").glob("*.json"):
                 if path.name.endswith(".state.json"): continue;
                 job = json.loads(path.read_text())
                 journal = path.with_suffix(".state.json")
                 if journal.exists(): job.update(json.loads(journal.read_text()))
-                if job["state"] == "running": job["state"] = "paused"
-                if job.get("execution")=="stored" and job["state"]=="uploading":job["state"]="uncertain"
+                if job["state"] == "running":
+                    job["state"] = "uncertain" if job.get("execution")=="segmented" else "paused"
+                if job.get("execution") in ("stored","segmented") and job["state"] in ("uploading","waiting"):job["state"]="uncertain"
                 self.jobs[job["id"]] = job
-        self.active = next((j["id"] for j in self.jobs.values() if j["state"] in ("paused","uncertain")), None)
+        self.active = next((j["id"] for j in self.jobs.values() if j["state"] in ("paused","uncertain","awaiting_pen")), None)
         self.worker = None
         self.operation_lock = asyncio.Lock()
         self.speed_lock = asyncio.Lock()
@@ -71,11 +74,18 @@ class Controller:
 
     def persist(self, job):
         path = self.data_dir/"jobs"/(job["id"]+".json")
-        if not path.exists():
-            save_json(path, job)
+        state={k:v for k,v in job.items() if k not in ("commands","paths")}
+        previous,when=self.persisted_states.get(job["id"],({},0))
+        if path.exists():
+            if state==previous: return
+            changed={k for k in state.keys()|previous.keys() if state.get(k)!=previous.get(k)}
+            # Progress is reconstructible from device telemetry. State transitions
+            # and part checkpoints are always durable immediately.
+            if changed<={"accepted","completed"} and time.monotonic()-when<1: return
+            save_json(path.with_suffix(".state.json"),state)
         else:
-            save_json(path.with_suffix(".state.json"),
-                      {k:v for k,v in job.items() if k not in ("commands","paths")})
+            save_json(path,job)
+        self.persisted_states[job["id"]]=(dict(state),time.monotonic())
 
     def disconnected(self, reason):
         self.connection_message = "Reconnecting automatically"
@@ -83,7 +93,7 @@ class Controller:
         if self.active and self.active in self.jobs:
             job = self.jobs[self.active]
             if job["state"] == "running":
-                if job.get("execution")=="stored":
+                if job.get("execution") in ("stored","segmented"):
                     job["message"]="Controller offline; verified plot continues on the device"
                     self.persist(job)
                     return
@@ -99,9 +109,12 @@ class Controller:
         state = self.link.state
         if self.active and self.active in self.jobs:
             job = self.jobs[self.active]
-            if job.get("execution")=="stored" and self.link.connected:
+            if job.get("execution")=="segmented" and self.link.connected:
+                if job["state"] not in ("paused","awaiting_pen","cancelled","interrupted","error","completed") and (not self.worker or self.worker.done()):
+                    self.worker = asyncio.create_task(self.run_segments(job))
+            elif job.get("execution")=="stored" and self.link.connected:
                 self.reconcile_stored(job)
-            if job.get("execution")!="stored" and job.get("base_id") and job.get("boot") == state.get("boot"):
+            if job.get("execution") not in ("stored","segmented") and job.get("base_id") and job.get("boot") == state.get("boot"):
                 job["completed"] = max(job.get("completed",0),
                     min(job["command_count"], max(0, state.get("completed",0)-job["base_id"]+1)))
         return {"connected":self.link.connected, "device":dict(state),
@@ -115,7 +128,7 @@ class Controller:
     async def connect(self):
         if not self.robot.host or not self.robot.token:
             raise ValueError("Robot connection must be configured in the server .env file")
-        if self.worker and not self.worker.done():
+        if self.worker and not self.worker.done() and (not self.active or self.jobs[self.active].get("execution")!="segmented"):
             raise ValueError("Pause the current job before reconnecting")
         state = await self.link.connect(self.robot.host, self.robot.token, self.robot.port)
         self.connection_message = "Linked by server configuration"
@@ -288,8 +301,32 @@ class Controller:
             if self.calibration.get("version",1)>=2:
                 options["paper_corners"]=[self.calibration["corners"][key]["xy"] for key in CORNERS]
         options.setdefault("feed", profile["feed"])
+        color_mode=options.get("color_mode","mono")
+        if color_mode not in ("mono","rgbk"): raise ValueError("Unknown pen palette")
+        if color_mode=="rgbk":
+            if "image" not in data: raise ValueError("Four-pen mode supports PNG, JPG and WebP images; use monochrome for SVG or generated patterns")
+            from .color import prepare_color
+            options["servo_speed"]=device.get("servo_speed",35)
+            prepared=prepare_color(data["image"],options,device.get("pen_up",90),device.get("pen_down",40))
+            prepared.update(source_type="image",quality=quality,feed=float(options["feed"]),
+                            calibration_id=self.calibration["id"] if self.calibration else None)
+            warnings=["Limited red/green/blue/black pen palette; preview is approximate. Manual pen changes are excluded from time estimates.",
+                      "Keep paper and gondola fixed; use matching pen bodies and the same tip depth for every color."]
+            if prepared["omitted_colors"]:
+                warnings.append("No printable marks remained for: %s. Try Detailed or smaller minimum marks." % ", ".join(prepared["omitted_colors"]))
+            if self.calibration and self.calibration.get("max_error_mm",0)>3:
+                warnings.append("Captured paper-size mismatch is %.1f mm; verify placement before drawing." % self.calibration["max_error_mm"])
+            return dict(prepared,id=str(uuid.uuid4()),title=str(data.get("name","Color drawing"))[:120],
+                        warnings=warnings,
+                        state="queued",created=time.time(),accepted=0,completed=0,base_id=None,boot=None,message="Ready for color-stage review")
         metadata, source_bounds = {"source_type":"svg", "quality":quality}, None
-        if data.get("demo"):
+        if data.get("diagnostic"):
+            from .accuracy import diagnostic_paths
+            paths, source_bounds = diagnostic_paths(options)
+            warnings = ["Measure the grid and circle after drawing; compare centre and edge errors before changing geometry."]
+            title = "Accuracy grid · 50 mm spacing, 50 mm circle"
+            metadata["source_type"] = "diagnostic"
+        elif data.get("demo"):
             paths, warnings = demo_paths(), []
             title = "Harmonic study"
             metadata["source_type"] = "demo"
@@ -297,10 +334,24 @@ class Controller:
             paths, warnings, metadata, source_bounds = raster_paths(data["image"], options)
             title = str(data.get("name", "Image drawing"))[:120]
         else:
-            paths, warnings = svg_paths(str(data.get("svg", "")))
+            svg = str(data.get("svg", ""))
+            paths, warnings = svg_paths(svg)
+            # Re-flatten curves in units derived from their final paper size.
+            pw,ph=PAPER[options.get("paper","18 × 24")]
+            margin=finite(options.get("margin",25.4),"margin")
+            if margin<0 or 2*margin>=min(pw,ph): raise ValueError("Margins leave no drawing area")
+            xs=[p[0] for path in paths for p in path];ys=[p[1] for path in paths for p in path]
+            width,height=max(xs)-min(xs),max(ys)-min(ys)
+            scale=min((pw-2*margin)/width if width else float('inf'),(ph-2*margin)/height if height else float('inf'))
+            if scale!=float('inf'):
+                paths,warnings=svg_paths(svg,tolerance=.025/scale)
             title = str(data.get("name", "Untitled drawing"))[:120]
+        options["servo_speed"] = device.get("servo_speed",35)
+        # Hatch paths already follow layer/serpentine ordering; opt-in routing is for SVG/outlines.
+        if metadata.get("image_mode") in ("wave","crosshatch","hatching"):
+            options["optimize_travel"] = False
         prepared = prepare(paths, options, device.get("pen_up",90), device.get("pen_down",40), source_bounds)
-        prepared.update(metadata, path_count=len(paths), feed=float(options["feed"]))
+        prepared.update(metadata, feed=float(options["feed"]))
         prepared["calibration_id"]=self.calibration["id"] if self.calibration else None
         if self.calibration and self.calibration.get("max_error_mm",0)>3:
             warnings.append("Captured corners accepted as provided. Paper-size mismatch is %.1f mm; verify the preview and use generous margins." % self.calibration["max_error_mm"])
@@ -311,6 +362,7 @@ class Controller:
 
     def import_artwork(self, data):
         job = self.build_artwork(data, dict(self.link.state))
+        job["transfer_parts"] = len(execution_parts(job)[0])
         self.jobs[job["id"]] = job; self.persist(job)
         return self.public_job(job, True)
 
@@ -319,6 +371,7 @@ class Controller:
         if self.preparation_lock.locked(): raise ValueError("Another drawing is being prepared; try again shortly")
         async with self.preparation_lock:
             job = await asyncio.to_thread(self.build_artwork, data, dict(self.link.state))
+            job["transfer_parts"] = len(execution_parts(job)[0])
             self.jobs[job["id"]] = job; self.persist(job)
             return self.public_job(job, True)
 
@@ -356,7 +409,28 @@ class Controller:
         self.validate_job(job)
         if self.link.state.get("holding") or self.link.state.get("paused"):
             raise ValueError("Resolve the robot's paused state before starting a new job")
-        if self.link.state.get("stored_plot_api")==1:
+        if job.get("color_stages") and (self.link.state.get("busy") or self.link.state.get("moving") or self.link.state.get("pen")!=self.link.state.get("pen_up")):
+            raise ValueError("Finish other motion and lift the pen before starting a color job")
+        if job.get("color_stages") and self.link.state.get("stored_plot_api",0)<2:
+            raise ValueError("Four-pen jobs need the multipart ESP32 firmware update")
+        if self.link.state.get("stored_plot_api",0)>=1:
+            parts,_ = execution_parts(job, self.link.state.get("plot_capacity",0))
+            if len(parts)>1 or job.get("color_stages"):
+                if self.link.state.get("stored_plot_api",0)<2:
+                    raise ValueError("This large job needs the updated multipart ESP32 firmware")
+                if not self.calibration: raise ValueError("Complete paper calibration first")
+                self.active=job_id
+                job.update(state="uploading",execution="segmented",accepted=0,completed=0,
+                           boot=self.link.state["boot"],plot_run=str(uuid.uuid4()),part_index=0,
+                           transfer_parts=len(parts),part_capacity=self.link.state["plot_capacity"],
+                           message="Uploading first part; robot lifts and waits between transfers")
+                if job.get("color_stages"):
+                    stage=job["color_stages"][0]
+                    job.update(state="awaiting_pen",pending_stage=0,confirmed_stage=-1,
+                               message="Install the %s pen, then confirm to begin" % stage["name"])
+                self.persist(job)
+                if job["state"]!="awaiting_pen":self.worker=asyncio.create_task(self.run_segments(job))
+                return self.public_job(job)
             if not self.calibration:raise ValueError("Complete paper calibration before uploading a stored plot")
             payload,crc=encode_plot(job)
             if len(payload)>self.link.state.get("plot_capacity",0):raise ValueError("Plot exceeds device storage capacity")
@@ -392,6 +466,113 @@ class Controller:
                    state="running", message="Drawing", started=time.time())
         self.active = job_id; self.persist(job)
         self.worker = asyncio.create_task(self.run_job(job))
+        return self.public_job(job)
+
+    async def run_segments(self, job):
+        parts,stage_owners = execution_parts(job, job["part_capacity"])
+        original_ids = {id(c) for c in job["commands"]}
+        source_counts = [sum(id(c) in original_ids for c in part) for part in parts]
+        try:
+            while self.active==job["id"] and job["state"] not in ("paused","cancelled","interrupted","error","completed"):
+                if not self.link.connected:
+                    job.update(state="waiting",message="Controller disconnected; device finishes its part, lifts and waits")
+                    await asyncio.sleep(.2)
+                    continue
+                d = dict(self.link.state)
+                if d.get("boot")!=job["boot"]:
+                    job.update(state="interrupted",message="Robot rebooted; restore position and explicitly restart")
+                    self.active=None;break
+                if d.get("fault") or d.get("plot_state") in ("fault","error","stopped"):
+                    raise DeviceError("Device stopped; restore position before restarting")
+                if d.get("paused") or d.get("holding"):
+                    job.update(state="paused",message="Explicit resume required");break
+                index=job["part_index"]
+                if index>=len(parts):
+                    job.update(state="completed",completed=job["command_count"],message="All parts finished",finished=time.time())
+                    self.active=None;break
+                stage_index=stage_owners[index]
+                if stage_index is not None and job.get("confirmed_stage",-1)<stage_index:
+                    stage=job["color_stages"][stage_index]
+                    job.update(state="awaiting_pen",pending_stage=stage_index,
+                               message="Stage %d of %d: install the %s pen and confirm. Keep paper and gondola fixed." %
+                               (stage_index+1,len(job["color_stages"]),stage["name"]))
+                    break
+                part_id,run=part_identity(job,index)
+                base=sum(source_counts[:index])
+                if stage_index is not None:job["current_stage"]=stage_index
+                if d.get("plot_id")==part_id and d.get("plot_run")==run:
+                    if d.get("plot_state") in ("completed","waiting"):
+                        job.update(part_index=index+1,completed=base+source_counts[index])
+                        self.persist(job)
+                        continue
+                    if d.get("plot_state")=="running":
+                        # Transfer-only boundary commands are excluded from overall progress.
+                        fraction=min(1.,d.get("plot_completed",0)/len(parts[index]))
+                        job.update(state="running",completed=base+int(source_counts[index]*fraction),
+                                   message="Drawing part %d of %d; device can finish this part offline" % (index+1,len(parts)))
+                        await asyncio.sleep(.1)
+                        continue
+                if d.get("plot_state")=="running":
+                    raise DeviceError("Another stored run owns the robot")
+                self.validate_job(job)
+                payload,crc=encode_plot({"commands":parts[index]})
+                job.update(state="uploading",message="Uploading part %d of %d; pen lifted" % (index+1,len(parts)))
+                self.persist(job)
+                try:
+                    async with self.operation_lock:
+                        reply=await self.link.control("plot_begin",job=part_id,parent=job["id"],chain=job["plot_run"],
+                            part=index,final=index==len(parts)-1,cal=self.calibration["id"],count=len(payload)//16,
+                            crc=crc,up=job["pen_up"],down=job["pen_down"],spu0=self.calibration["spu"][0],
+                            spu1=self.calibration["spu"][1],confirm=True,timeout=30)
+                        offset=int(reply.get("plot_received",0))
+                        if not 0<=offset<=len(payload) or offset%16: raise DeviceError("Invalid upload offset")
+                        while offset<len(payload):
+                            if job["state"] in ("paused","cancelled"): return
+                            part=payload[offset:offset+384]
+                            await self.link.control("plot_chunk",offset=offset,data=base64.b64encode(part).decode(),timeout=15)
+                            offset+=len(part)
+                            job["accepted"]=base+int(source_counts[index]*offset/len(payload))
+                        await self.link.control("plot_commit",timeout=30)
+                        if job["state"] in ("paused","cancelled"): return
+                        await self.link.control("plot_start",job=part_id,run=run,confirm=True,timeout=30)
+                    if job["state"] not in ("paused","cancelled"):
+                        job.update(state="running")
+                except (ConnectionError,OSError,asyncio.TimeoutError):
+                    if job["state"] in ("paused","cancelled"): return
+                    # Reconcile deterministic part/run IDs before retrying any start.
+                    job.update(state="uncertain",message="Reconnecting to verify this part before continuing")
+                    await self.link.close()
+        except asyncio.CancelledError:
+            raise
+        except (DeviceError,ValueError,KeyError) as exc:
+            if job["state"] in ("paused","cancelled"): return
+            job.update(state="error",message=str(exc));self.active=None
+            if self.link.connected:
+                with contextlib.suppress(Exception): await self.link.control("pause")
+        finally:
+            self.persist(job)
+
+    async def confirm_pen_change(self,data):
+        if not isinstance(data,dict) or data.get("confirmed") is not True:
+            raise ValueError("Confirm that the requested pen is installed at the same tip depth")
+        if not self.active or data.get("id")!=self.active: raise ValueError("No matching active color job")
+        job=self.jobs[self.active]
+        if job.get("state")!="awaiting_pen" or not job.get("color_stages"):
+            raise ValueError("This job is not waiting for a pen change")
+        if data.get("run")!=job.get("plot_run") or type(data.get("stage")) is not int or data["stage"]!=job.get("pending_stage"):
+            raise ValueError("Pen-change request is stale; refresh the current stage")
+        self.validate_job(job)
+        d=self.link.state
+        if d.get("boot")!=job.get("boot"): raise ValueError("Robot rebooted; restore position and restart explicitly")
+        if d.get("moving") or d.get("paused") or d.get("holding") or d.get("pen")!=d.get("pen_up"):
+            raise ValueError("Wait for motion to finish with the pen lifted before changing pens")
+        if d.get("busy") and not (d.get("plot_state")=="waiting" and d.get("plot_parent")==job["id"] and d.get("plot_chain")==job["plot_run"]):
+            raise ValueError("Another operation owns the robot; pen changing is not ready")
+        if self.worker and not self.worker.done(): await self.worker
+        job.update(confirmed_stage=data["stage"],current_stage=data["stage"],state="uploading",
+                   message="Pen confirmed; uploading its drawing stage")
+        self.persist(job)
+        self.worker=asyncio.create_task(self.run_segments(job))
         return self.public_job(job)
 
     def reconcile_stored(self,job):
@@ -483,7 +664,8 @@ class Controller:
             raise ValueError("Wait until buffered motion stops and the pen is up")
         await self.link.control("resume")
         job.update(state="running", message="Drawing"); self.persist(job)
-        if job.get("execution")!="stored":self.worker = asyncio.create_task(self.run_job(job))
+        if job.get("execution")=="segmented": self.worker=asyncio.create_task(self.run_segments(job))
+        elif job.get("execution")!="stored":self.worker = asyncio.create_task(self.run_job(job))
         return self.public_job(job)
 
     async def stop(self):
@@ -495,7 +677,7 @@ class Controller:
         finally:
             if self.active:
                 job = self.jobs[self.active]
-                job.update(state="cancelled", message="Stopped; reset and rehome before drawing")
+                job.update(state="cancelled", message="Emergency stop; reset and restore position before drawing")
                 self.persist(job); self.active = None
         return self.snapshot()
 
@@ -600,6 +782,7 @@ class HttpServer:
         if path == "/api/pen-calibration": return await c.pen_calibration_action(data)
         if path == "/api/speeds": return await c.set_speeds(data)
         if path == "/api/import": return await c.import_async(data)
+        if path == "/api/pen-change": return await c.confirm_pen_change(data)
         if path == "/api/start": return await c.start(data["id"], data.get("reviewed",False))
         if path == "/api/pause": return await c.pause()
         if path == "/api/resume": return await c.resume()

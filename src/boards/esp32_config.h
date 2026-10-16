@@ -1,4 +1,5 @@
 #pragma once
+#include <esp_attr.h>
 #if __has_include("esp32_local.h")
 #  include "esp32_local.h"
 #endif
@@ -10,7 +11,7 @@
 #ifndef MOTOR_1_DIR_INVERT
 #  define MOTOR_1_DIR_INVERT 0
 #endif
-inline bool esp32MotorDirectionLevel(int axis, bool logicalHigh) {
+inline __attribute__((always_inline)) bool esp32MotorDirectionLevel(int axis, bool logicalHigh) {
   return logicalHigh != (axis == 0 ? bool(MOTOR_0_DIR_INVERT) : bool(MOTOR_1_DIR_INVERT));
 }
 #ifndef MOTOR_0_STEP_PIN

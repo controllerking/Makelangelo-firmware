@@ -1192,7 +1192,9 @@ void describeSegment(Segment *block) {
 // Process blocks in the isr
 hal_timer_t Stepper::isrBlockPhase() {
   hal_timer_t interval = (STEPPER_TIMER_RATE) / 1000UL;
-
+#ifdef TARGET_ESP32
+  bool finished=false;
+#endif
   if(working_block) {
     // Is this segment done?
     if(steps_taken >= steps_total) {
@@ -1201,6 +1203,9 @@ hal_timer_t Stepper::isrBlockPhase() {
 #endif
       // Move on to next segment without wasting an interrupt tick.
       planner.releaseCurrentBlock();
+#ifdef TARGET_ESP32
+      finished=true;
+#endif
       working_block     = NULL;
     } else {
       if(steps_taken <= accel_until) {
@@ -1316,6 +1321,9 @@ hal_timer_t Stepper::isrBlockPhase() {
     }
   }
 
+#ifdef TARGET_ESP32
+  if(finished && !working_block)motionRecordDrain();
+#endif
   return interval;
 }
 
@@ -1330,9 +1338,12 @@ void Stepper::isr() {
   // Timer autoreloads to zero. Schedule from ISR entry and leave enough time
   // after the work for the next pulse. Do not toggle global FreeRTOS IRQs.
   portENTER_CRITICAL_ISR(&stepperMux);
+  const hal_timer_t entry=HAL_timer_get_count(0);
   isrPulsePhase();
   const hal_timer_t interval = motionScaledInterval(isrBlockPhase(),motionStepperPermille());
-  HAL_timer_set_compare(0, _MAX(interval, HAL_timer_get_count(0) + 20));
+  const hal_timer_t now=HAL_timer_get_count(0);
+  motionRecordIsr(now-entry,entry,interval<now+20);
+  HAL_timer_set_compare(0, _MAX(interval, now + 20));
   portEXIT_CRITICAL_ISR(&stepperMux);
 #else
   static hal_timer_t nextMainISR=0;

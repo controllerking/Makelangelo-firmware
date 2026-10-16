@@ -73,7 +73,7 @@ HATCH_ANGLES = (math.radians(45), math.radians(135), 0., math.pi/2)
 HATCH_LEVELS = (.12, .32, .52, .72)   # darkness at which each layer switches on
 
 
-def hatch_layers(dark, w, h, scale, pitch):
+def hatch_layers(dark, w, h, scale, pitch, bridge_mm=0):
     """Straight lines in up to four directions; darker tone gets more layers.
 
     A run is only two points. Short gaps are drawn through and neighbouring line
@@ -81,7 +81,7 @@ def hatch_layers(dark, w, h, scale, pitch):
     """
     pitch_px = pitch/scale
     step = max(1., pitch_px/2)
-    gap = math.ceil(3*pitch_px/step)
+    gap = int(bridge_mm/scale/step)
     paths = []
     for layer, (theta, level) in enumerate(zip(HATCH_ANGLES, HATCH_LEVELS)):
         if dark.max() <= level: continue
@@ -110,7 +110,14 @@ def hatch_layers(dark, w, h, scale, pitch):
                 for a, b in runs:
                     if b-a < 1 or math.dist((xs[a], ys[a]), (xs[b], ys[b])) < pitch_px: continue
                     seg = [(float(xs[a]), float(ys[a])), (float(xs[b]), float(ys[b]))]
+                    connect = False
                     if paths and paths[-1][1] == layer and math.dist(paths[-1][0][-1], seg[0]) <= 1.6*pitch_px:
+                        start = paths[-1][0][-1]
+                        n = max(2, math.ceil(math.dist(start,seg[0])/.5))
+                        cx = np.linspace(start[0],seg[0][0],n)
+                        cy = np.linspace(start[1],seg[0][1],n)
+                        connect = bool(np.all(dark[np.clip(cy.astype(int),0,h-1),np.clip(cx.astype(int),0,w-1)] > level))
+                    if connect:
                         paths[-1][0].extend(seg)
                     else: paths.append([seg, layer])
             s += pitch_px
@@ -118,13 +125,13 @@ def hatch_layers(dark, w, h, scale, pitch):
     return [p for p, _ in paths]
 
 
-def hatch_paths(w, h, pixels, scale, config):
+def hatch_paths(w, h, pixels, scale, config, bridge_mm=0):
     if np is None:
         raise ValueError("Crosshatch style needs numpy on the controller (apt install python3-numpy)")
     pitch = config["hatch_pitch"]
     for _ in range(8):
         dark = box_blur(tone(w, h, pixels), max(1, round(pitch/scale/2)))
-        paths = hatch_layers(dark, w, h, scale, pitch)
+        paths = hatch_layers(dark, w, h, scale, pitch, bridge_mm)
         if len(paths) <= config["hatch_strokes"]: return paths
         pitch *= 1.3   # too many pen lifts: widen the line spacing and retry
     raise ValueError("Crosshatch needs too many pen lifts; choose Fast or smaller paper")
@@ -142,7 +149,7 @@ def wave_paths(w, h, pixels, scale, config):
     per_period = 8
     dark = tone(w, h, pixels)
     width_mm, height_mm = w*scale, h*scale
-    pitch = max(1.5, math.sqrt(width_mm*height_mm*per_period/config["wave_points"]))
+    pitch = max(1.5, config.get("pen_pitch",0), math.sqrt(width_mm*height_mm*per_period/config["wave_points"]))
     rows = max(2, int(height_mm/pitch))
     pitch = height_mm/rows
     dark = box_blur(dark, max(1, round(pitch/scale)))
@@ -249,6 +256,15 @@ def raster_paths(image, options):
     margin = finite(options.get("margin",25.4), "margin")
     if margin < 0 or margin*2 >= min(pw,ph): raise ValueError("Margins leave no drawing area")
     scale = min((pw-2*margin)/w, (ph-2*margin)/h)
+    pen_width = finite(options.get("pen_width",.3),"pen width")
+    bridge = finite(options.get("bridge_gap",0),"bridge gap")
+    if not .05 <= pen_width <= 3 or not 0 <= bridge <= 5: raise ValueError("Pen width or gap bridging is out of range")
+    config = dict(config)
+    config["pen_pitch"] = pen_width*1.25
+    config["tolerance"] = min(config["tolerance"],pen_width/2)
+    config["spacing"] = max(config["spacing"],pen_width*1.25)
+    config["sample"] = max(config["sample"],pen_width)
+    config["hatch_pitch"] = max(config["hatch_pitch"],pen_width*1.25)
     mode = options.get("image_mode", "hatching")
     adjusted = False
     if mode == "outlines":
@@ -289,11 +305,11 @@ def raster_paths(image, options):
         paths = wave_paths(w, h, pixels, scale, config)
         if sum(map(len, paths)) > 95_000: raise ValueError("Wavy lines need too many points; choose Fast or smaller paper")
     elif mode == "crosshatch":
-        paths = hatch_paths(w, h, pixels, scale, config)
+        paths = hatch_paths(w, h, pixels, scale, config, bridge)
     else: raise ValueError("Unknown image conversion style")
     if not paths: raise ValueError("No drawable marks found; try another style or adjust the outline threshold")
     warnings = ["Image converted to monochrome pen strokes. A working pen-lift servo is required.",
-                "Time is approximate; acceleration, pen lifts and the first travel move add time."]
+                "Time includes estimated pen ramps, travel and acceleration; corner slowdowns and the first travel move add time."]
     if adjusted: warnings.append("Shading spacing adapted to paper size to keep this preset's plot budget bounded.")
     return paths, warnings, {"source_type":"image", "quality":key,
                             "image_mode":mode, "image_size":[w,h]}, (0.,0.,float(w),float(h))

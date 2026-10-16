@@ -82,7 +82,7 @@ origin fields. No physical position is restored automatically.
 3. Put the fixed robot hostname/IP, TCP port and pairing key in the server's private `.env` file and start the server. Linking happens automatically; the UI only shows connection status.
 4. Home the robot. Enter measured paper left X and top Y in millimetres, choose paper size, margins, and speed.
 5. Upload a PNG/JPG/WebP image or SVG, choose quality, and click **Convert & preview**. Review the pen paths, confirm paper/carriage clearance and a working pen lift, then start.
-6. Pause drains planned motion, lifts the pen, and retains motors/position. Resume is explicit. Stop cancels and requires resetting/re-homing the robot.
+6. Pause drains planned motion, lifts the pen, and retains motors/position. Resume is explicit. Emergency stop immediately aborts, disables motors and invalidates position; reset and explicitly restore/home before drawing again.
 
 The paper placement fields intentionally have no guessed machine coordinates. Y is positive upwards; paper below the anchors usually has negative Y. Speeds are mm/second.
 
@@ -142,7 +142,7 @@ Expand clipping/masks and nested SVG viewports. CSS stylesheets must be inlined
 into element attributes. Scripts are ignored; SVG is never inserted into the
 browser DOM. Uploads, elements, nesting, and point counts are bounded.
 
-Prepared drawings and history live in controller/data/ (Git-ignored). Immutable artwork is stored once; small state journals track progress. A restarted service pauses any formerly-running job and requires reconnection/explicit resume. A robot reboot invalidates resume and requires homing plus an explicitly restarted job.
+Prepared drawings and history live in controller/data/ (Git-ignored). Immutable artwork is stored once; small state journals track progress. A restarted service pauses formerly-running streamed jobs. Multipart stored jobs reconcile the current part and continue automatically on the same device boot; explicitly paused jobs remain paused. A robot reboot invalidates resume and requires homing plus an explicitly restarted job.
 
 ## Hardware-free preview and tests
 
@@ -162,3 +162,9 @@ data, preparation concurrency, history, real TCP/HTTP flow against a simulated
 robot, acknowledgement loss/retries, disconnect/reconnect, explicit pause/resume,
 buffer saturation, stop, boot-change lockout, authentication and cross-origin
 rejection. It does not replace physical Wi-Fi/motor/servo commissioning.
+
+Quality controls, accuracy measurements and multipart transfer behavior are described in [quality and efficiency](../docs/QUALITY_AND_EFFICIENCY.md).
+
+Four-pen image preparation, manual changes and recovery are described in [color drawings](../docs/COLOR_DRAWINGS.md).
+
+Plot storage usage and cleanup status appear in the robot card. Finished/stopped files are reclaimed, partial uploads expire after two idle minutes, and unstarted verified files after ten. See [stored plots](../docs/STORED_PLOTS.md).

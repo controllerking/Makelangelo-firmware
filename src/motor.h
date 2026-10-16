@@ -6,6 +6,7 @@
 //------------------------------------------------------------------------------
 
 #include <Arduino.h>
+#include "motion_control.h"
 
 #include "macros.h"
 
@@ -289,11 +290,11 @@ public:
 
   static bool isBlockBusy(const Segment *block);
 
-  static void setDirections(uint16_t bits);
+  static DRAWY_ISR void setDirections(uint16_t bits);
 
-  static void isr();
-  static void isrPulsePhase();
-  static hal_timer_t isrBlockPhase();
+  static DRAWY_ISR void isr();
+  static DRAWY_ISR void isrPulsePhase();
+  static DRAWY_ISR hal_timer_t isrBlockPhase();
 
 #if defined(S_CURVE_ACCELERATION)
   static void _calc_bezier_curve_coeffs(const int32_t v0, const int32_t v1, const uint32_t av);
@@ -305,6 +306,11 @@ public:
     @input desired_freq_hz the desired frequency
   */
   FORCE_INLINE static uint32_t calc_interval(uint32_t step_rate, uint8_t * loops) {
+#ifdef TARGET_ESP32
+    // Commissioned maximum is 2400 motor pulses/s; no flash lookup table needed.
+    *loops=1;
+    return uint32_t(STEPPER_TIMER_RATE)/_MAX(step_rate,1UL);
+#else
     uint32_t timer;
     uint8_t step_multiplier = 1;
     
@@ -349,6 +355,7 @@ public:
     #endif
 
     return timer;
+#endif
   }
 };
 

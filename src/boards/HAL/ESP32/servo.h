@@ -11,7 +11,7 @@ class Servo {
     ledcAttachPin(pin_, 0);
     update();
   }
-  void write(int angle) {
+  inline __attribute__((always_inline)) void write(int angle) {
     angle = constrain(angle, 0, 180);
     pulse_ = WALL_SERVO_MIN_US +
       (WALL_SERVO_MAX_US - WALL_SERVO_MIN_US) * angle / 180;

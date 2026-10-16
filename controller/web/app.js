@@ -8,6 +8,7 @@ let waveChecked=false;
 const cornerNames=['top_left','top_right','bottom_right','bottom_left'];
 let currentPage=null,initialPageChosen=false;
 let monitoredJobId=null,startBusy=false;
+let penChangeKey=null,penChangeBusy=false;
 // Move the existing form intact: no duplicate controls or draft reset.
 $('calibration-content').append($('calibration-card'));
 $('monitor-controls').append($('robot-card'),$('speeds-card'));
@@ -95,23 +96,38 @@ function render() {
   for(const id of ['home','pen-up','pen-down'])$(id).disabled ||= !!snapshot.pen_draft;
   $('home').disabled ||= !d.switch_homing_enabled || !!snapshot.calibration || !!snapshot.calibration_draft;
   $('start').disabled=startBusy || preparing || !connected || !d.homed || !!d.fault || !!active || !selected || !$('reviewed').checked || !!d.paused || !!snapshot.calibration_draft || !!snapshot.pen_draft || !!d.pen_tuning;
-  $('start').textContent=startBusy?'Uploading…':'Upload & start drawing';
-  $('pause').disabled=!connected || !active || active.state!=='running';
+  $('start').textContent=startBusy?'Starting…':artwork?.color_stages?'Start color stages':'Upload & start drawing';
+  $('pause').disabled=!connected || !active || !['running','uploading','waiting','uncertain'].includes(active.state);
   $('resume').disabled=!connected || (active ? active.state!=='paused' : !!d.busy) || !d.paused || !!d.moving || !!d.fault || !d.homed;
   $('resume').textContent=active?'Resume':'Resume robot';
   $('stop').disabled=!connected || !!d.fault;
   $('header-stop').disabled=$('stop').disabled;
   const monitored=active || snapshot.jobs.find(j=>j.id===monitoredJobId) || snapshot.jobs[0];
   if(monitored)monitoredJobId=monitored.id;
+  const storageTotal=d.plot_storage_total,storageFree=d.plot_free;
+  $('plot-storage').textContent=storageTotal>0?'Plot storage: '+Math.round(Math.max(0,storageTotal-storageFree)/1024)+' / '+Math.round(storageTotal/1024)+' KiB used'+(d.plot_cleanup_error?' · cleanup failed; retrying':d.plot_cleanup_pending?' · cleanup pending':''):storageFree>0?'Plot storage: '+Math.round(storageFree/1024)+' KiB free':'Plot storage: unavailable until initialized.';
+  const timing=d.motion_diagnostics;
+  $('motion-diagnostics').textContent=timing?'Longest interrupt '+timing.max_isr_us+' µs · longest delay '+timing.max_latency_us+' µs · timer clamps '+timing.interval_clamps+' · queue drains '+timing.planner_drains+'. Queue drains include normal pen lifts and job endings.':'Available after the firmware update.';
   $('monitor-job-title').textContent=monitored?.title||'No active drawing';
   $('monitor-job-state').textContent=monitored?.state?.toUpperCase()||'NO JOB SELECTED';
   $('monitor-job-details').textContent=monitored?monitored.paper+' · '+monitored.command_count.toLocaleString()+' commands · prepared estimate '+duration(monitored.estimated_seconds):'Prepare an image or select a job from the queue.';
+  if(monitored?.color_stages){
+    const stage=monitored.color_stages[monitored.state==='awaiting_pen'?monitored.pending_stage:monitored.current_stage??0];
+    $('monitor-job-details').textContent+=' · '+stage.name+' pen · '+monitored.color_stages.length+' color stages';
+  }
   $('monitor-review').disabled=!monitored || !!active || startBusy;
+  const waitingForPen=active?.state==='awaiting_pen';
+  const changeKey=waitingForPen?active.id+':'+active.plot_run+':'+active.pending_stage:null;
+  if(changeKey!==penChangeKey){penChangeKey=changeKey;$('pen-change-confirmed').checked=false;}
+  $('pen-change-panel').hidden=!waitingForPen;
+  const nextPen=active?.color_stages?.[active.pending_stage];
+  $('pen-change-title').textContent=nextPen?'Stage '+(active.pending_stage+1)+' of '+active.color_stages.length+' · Install '+nextPen.name+' pen':'';
+  $('pen-change').disabled=penChangeBusy || !waitingForPen || !connected || !!d.moving || !!d.fault || !!d.paused || !!d.holding || d.pen!==d.pen_up || !$('pen-change-confirmed').checked;
   $('job-message').textContent=d.fault?'Reset the robot, then restore position.':monitored?.message||'No drawing running. Prepare artwork to get started.';
   const uploading=monitored?.state==='uploading',done=monitored?(uploading?monitored.accepted:monitored.completed)||0:0;
   const progress=monitored?100*done/monitored.command_count:0;
   $('progress').value=progress;
-  const phase=uploading?'Uploading':monitored?.state==='completed'?'Completed':monitored?.state==='paused'?'Paused':monitored?.state==='queued'?'Not started':'Drawing';
+  const phase=uploading?'Uploading':monitored?.state==='awaiting_pen'?'Waiting for pen change':monitored?.state==='waiting'?'Waiting for connection':monitored?.state==='completed'?'Completed':monitored?.state==='paused'?'Paused':monitored?.state==='queued'?'Not started':'Drawing';
   $('progress-label').textContent=monitored?phase+': '+Math.floor(progress)+'% · '+done+' / '+monitored.command_count+' commands':'No active drawing';
   const queue=$('queue'); queue.replaceChildren();
   if (!snapshot.jobs.length) {const p=document.createElement('p');p.className='help';p.textContent='Your prepared drawings will appear here.';queue.append(p);}
@@ -211,12 +227,15 @@ async function calibratePen(body){
 }
 function options() {
   return {paper:$('paper').value,left:$('left').value,top:$('top').value,margin:$('margin').value,feed:$('feed').value,
-    quality:$('quality').value,image_mode:$('image-mode').value,threshold:$('threshold').value};
+    quality:$('quality').value,image_mode:$('image-mode').value,threshold:$('threshold').value,
+    pen_width:$('pen-width').value,minimum_mark:$('minimum-mark').value,path_tolerance:$('path-tolerance').value,
+    travel_feed:$('travel-feed').value,bridge_gap:$('bridge-gap').value,optimize_travel:$('optimize-travel').checked,
+    color_mode:$('color-mode').value,color_dither:$('color-dither').checked};
 }
 function invalidate() {
   revision++; selected=null; artwork=null; $('reviewed').checked=false; showArtwork(); render();
 }
-async function imagePayload(file, quality) {
+async function imagePayload(file, quality, color=false) {
   let bitmap;
   try { bitmap=await createImageBitmap(file); }
   catch(e) { throw new Error('Could not decode this image. Use a valid PNG, JPG or WebP file.'); }
@@ -228,13 +247,15 @@ async function imagePayload(file, quality) {
     canvas.width=Math.max(2,Math.round(bitmap.width*scale));canvas.height=Math.max(2,Math.round(bitmap.height*scale));
     const ctx=canvas.getContext('2d',{willReadFrequently:true});
     ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high';
     ctx.drawImage(bitmap,0,0,canvas.width,canvas.height);
     const rgba=ctx.getImageData(0,0,canvas.width,canvas.height).data;
-    const gray=new Uint8Array(canvas.width*canvas.height);
-    for(let i=0;i<gray.length;i++)gray[i]=Math.round(.2126*rgba[i*4]+.7152*rgba[i*4+1]+.0722*rgba[i*4+2]);
+    const gray=new Uint8Array(canvas.width*canvas.height*(color?3:1));
+    if(color){for(let i=0;i<canvas.width*canvas.height;i++)for(let c=0;c<3;c++)gray[i*3+c]=rgba[i*4+c];}
+    else for(let i=0;i<gray.length;i++)gray[i]=Math.round(.2126*rgba[i*4]+.7152*rgba[i*4+1]+.0722*rgba[i*4+2]);
     let binary='';
     for(let i=0;i<gray.length;i+=32768)binary+=String.fromCharCode(...gray.subarray(i,i+32768));
-    return {width:canvas.width,height:canvas.height,pixels:btoa(binary)};
+    return {width:canvas.width,height:canvas.height,pixels:btoa(binary),...(color?{channels:3}:{})};
   } finally { bitmap.close(); }
 }
 async function prepare() {
@@ -244,7 +265,7 @@ async function prepare() {
   const current=revision, settings=options(), input=source;
   preparing=true;render();
   try {
-    const payload=input.file?{image:await imagePayload(input.file,settings.quality),name:input.file.name}:input;
+    const payload=input.file?{image:await imagePayload(input.file,settings.quality,settings.color_mode==='rgbk'),name:input.file.name}:input;
     const result=await api('import',{...payload,options:settings});
     if(current!==revision){toast('Settings changed during conversion. Convert again for an updated preview.');return;}
     artwork=result; selected=artwork.id;
@@ -257,7 +278,9 @@ function showArtwork() {
   $('drawing-title').textContent=artwork?artwork.title:'Your next drawing';
   $('paper-label').textContent=artwork?artwork.paper+(artwork.paper.startsWith('A')?'':' in'):'18 × 24 in';
   $('drawing-details').textContent=artwork?artwork.command_count.toLocaleString()+' commands · '+artwork.drawn_mm.toLocaleString()+' mm of line'+(artwork.quality?' · '+artwork.quality:''):'Paper coordinates are measured in millimetres.';
-  $('estimate').textContent=artwork?'About '+duration(artwork.estimated_seconds):'';
+  $('estimate').textContent=artwork?'About '+duration(artwork.estimated_seconds)+' · pen '+duration(artwork.pen_seconds||0)+' · travel '+duration(artwork.travel_seconds||0)+(artwork.transfer_parts>1?' · '+artwork.transfer_parts+' parts':''):'';
+  $('color-stage-summary').hidden=!artwork?.color_stages;
+  $('color-stage-summary').textContent=artwork?.color_stages?.map((stage,i)=>(i+1)+'. '+stage.name+' · '+duration(stage.estimated_seconds)).join(' → ')||'';
   $('warning-list').hidden=!artwork?.warnings?.length;
   $('warning-list').textContent=artwork?.warnings?.join(' ')||'';
   draw();
@@ -288,7 +311,11 @@ function draw() {
     outline(inset.map(([u,v])=>[0,1].map(axis=>(1-u)*(1-v)*corners[0][axis]+u*(1-v)*corners[1][axis]+u*v*corners[2][axis]+(1-u)*v*corners[3][axis])));ctx.stroke();
   }else ctx.strokeRect(ox+margin*scale,oy+margin*scale,(w-2*margin)*scale,(h-2*margin)*scale);
   ctx.setLineDash([]);ctx.strokeStyle='#314a3c';ctx.lineWidth=.7;ctx.lineCap='round';ctx.lineJoin='round';
-  for (const path of artwork.paths) {
+  let stageIndex=0;
+  for (let pathIndex=0;pathIndex<artwork.paths.length;pathIndex++) {
+    const path=artwork.paths[pathIndex];
+    while(artwork.color_stages && stageIndex+1<artwork.color_stages.length && pathIndex>=artwork.color_stages[stageIndex].path_end)stageIndex++;
+    ctx.strokeStyle=artwork.color_stages?.[stageIndex]?.swatch||'#314a3c';
     ctx.beginPath();
     path.forEach(([x,y],i)=>{const px=ox+(x-left)*scale,py=oy+(top-y)*scale;i?ctx.lineTo(px,py):ctx.moveTo(px,py);});
     ctx.stroke();
@@ -339,9 +366,11 @@ $('svg-file').onchange=()=>act(async()=>{
   $('file-name').textContent=file.name+' · ready to convert';
 });
 $('art-form').onsubmit=e=>{e.preventDefault();act(prepare);};
-$('demo').onclick=()=>act(async()=>{source={demo:true};invalidate();$('image-settings').hidden=true;$('file-name').textContent='Harmonic study · generated on your computer';await prepare();});
-for(const id of ['paper','left','top','margin','feed','image-mode','threshold'])$(id).addEventListener('input',()=>{
-  $('threshold-field').hidden=$('image-mode').value!=='outlines';invalidate();
+$('demo').onclick=()=>act(async()=>{$('color-mode').value='mono';$('color-dither-field').hidden=$('color-help').hidden=true;source={demo:true};invalidate();$('image-settings').hidden=true;$('file-name').textContent='Harmonic study · generated on your computer';await prepare();});
+for(const id of ['paper','left','top','margin','feed','image-mode','threshold','pen-width','minimum-mark','path-tolerance','travel-feed','bridge-gap','optimize-travel','color-mode','color-dither'])$(id).addEventListener('input',()=>{
+  $('threshold-field').hidden=$('image-mode').value!=='outlines';
+  $('color-dither-field').hidden=$('color-help').hidden=$('color-mode').value!=='rgbk';
+  invalidate();
 });
 $('quality').onchange=()=>{
   const profile=snapshot.presets?.[$('quality').value];
@@ -364,8 +393,21 @@ $('monitor-review').onclick=()=>act(async()=>{
 });
 $('pause').onclick=()=>act(()=>api('pause',{}));
 $('resume').onclick=()=>act(()=>api('resume',{}));
-$('stop').onclick=$('calibration-stop').onclick=$('header-stop').onclick=()=>act(async()=>{await api('stop',{});toast('Stopped. Reset the robot and rehome before drawing again.');});
+$('stop').onclick=$('calibration-stop').onclick=$('header-stop').onclick=()=>act(async()=>{await api('stop',{});toast('Emergency stop: motors disabled and position invalid. Reset, then restore position before drawing again.');});
 $('calibration-continue').onclick=()=>{if(calibrationComplete())navigate('workspace');};
 renderRoute();
 new ResizeObserver(draw).observe($('preview'));
 refresh();setInterval(refresh,700);draw();
+
+$('diagnostic').onclick=()=>act(async()=>{$('color-mode').value='mono';$('color-dither-field').hidden=$('color-help').hidden=true;source={diagnostic:true};invalidate();await prepare();});
+
+$('pen-change-confirmed').onchange=render;
+$('pen-change').onclick=async()=>{
+  const job=snapshot.jobs.find(j=>j.id===snapshot.active);
+  if(penChangeBusy || $('pen-change').disabled || !job)return;
+  const body={id:job.id,run:job.plot_run,stage:job.pending_stage,confirmed:$('pen-change-confirmed').checked};
+  penChangeBusy=true;render();
+  try{await api('pen-change',body);}
+  catch(e){toast(e.message);}
+  finally{penChangeBusy=false;await refresh();}
+};

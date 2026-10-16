@@ -24,7 +24,7 @@ export async function runWebTests() {
       getBoundingClientRect:()=>({width:600,height:600}),getContext:()=>ctx};
   }
   for(const [,id] of html.matchAll(/id="([^"]+)"/g))elements.set(id,element());
-  for(const [id,value] of Object.entries({paper:'Letter',left:'100',top:'-100',margin:'20',feed:'10',quality:'balanced','image-mode':'hatching',threshold:'128'}))elements.get(id).value=value;
+  for(const [id,value] of Object.entries({paper:'Letter',left:'100',top:'-100',margin:'20',feed:'10',quality:'balanced','image-mode':'hatching',threshold:'128','pen-width':'.3','minimum-mark':'0','path-tolerance':'.02','travel-feed':'10','bridge-gap':'0','color-mode':'mono'}))elements.get(id).value=value;
   const state={connected:false,device:{},jobs:[],presets:{
     fast:{resolution:256,feed:15,description:'Fast'},balanced:{resolution:512,feed:10},detailed:{resolution:768,feed:6,description:'Detailed'},
   }};
@@ -77,6 +77,9 @@ export async function runWebTests() {
   await assert.rejects(vm.runInContext('imagePayload({bad:true},"fast")',sandbox),/Could not decode/);
   await assert.rejects(vm.runInContext('imagePayload({width:10000,height:10000},"fast")',sandbox),/40 megapixels/);
   assert.equal(closed,2);
+  const rgbPayload=await vm.runInContext('imagePayload({}, "fast", true)',sandbox);
+  assert.equal(rgbPayload.channels,3);
+  assert.deepEqual([...Buffer.from(rgbPayload.pixels,'base64')],[0,0,0,255,0,0,0,255,0,255,255,255]);
   elements.get('quality').value='detailed';elements.get('quality').onchange();
   assert.equal(elements.get('feed').value,6);
   assert.equal(elements.get('reviewed').checked,false);
@@ -87,6 +90,10 @@ export async function runWebTests() {
   assert.equal(calls.length,1);
   assert.equal(calls[0][0],'/api/import');
   assert.equal(calls[0][1].options.quality,'detailed');
+  assert.equal(calls[0][1].options.pen_width,'.3');
+  assert.equal(calls[0][1].options.travel_feed,'10');
+  assert.equal(calls[0][1].options.bridge_gap,'0');
+  assert.equal(calls[0][1].options.optimize_travel,false);
   assert.equal(calls[0][1].name,'photo.png');
   assert.equal(calls[0][1].image.width,2);
   assert.equal(elements.get('prepare').disabled,false);
@@ -161,6 +168,37 @@ export async function runWebTests() {
   assert.match(elements.get('progress-label').textContent,/Uploading: 12%/);
   assert.equal(elements.get('monitor-job-title').textContent,'Next print');
   assert.equal(calls.at(-1)[0],'/api/start');
+  const strokeColors=[];
+  ctx.stroke=()=>strokeColors.push(ctx.strokeStyle);
+  vm.runInContext('artwork='+JSON.stringify({paper_rect:[0,0,200,200],margin:20,
+    paths:[[[10,-10],[20,-20]],[[30,-30],[40,-40]]],
+    color_stages:[{path_start:0,path_end:1,swatch:'#dc232d'},{path_start:1,path_end:2,swatch:'#1e8c41'}]})+';draw()',sandbox);
+  assert.deepEqual(strokeColors.slice(-2),['#dc232d','#1e8c41'],'Preview paths retain their own pen colors');
+  state.active='color-job';
+  state.device={homed:true,pen:90,pen_up:90,moving:false,fault:false,plot_storage_total:1408*1024,plot_free:1000*1024};
+  state.jobs=[{id:'color-job',plot_run:'color-run',state:'awaiting_pen',pending_stage:0,
+    title:'Color artwork',paper:'Letter',command_count:100,completed:0,estimated_seconds:60,
+    color_stages:[{name:'Red'},{name:'Green'}]}];
+  const callsBeforePrompt=calls.length;
+  await vm.runInContext('refresh()',sandbox);
+  assert.match(elements.get('plot-storage').textContent,/408.*1408/);
+  assert.equal(elements.get('pen-change-panel').hidden,false);
+  assert.equal(elements.get('pen-change').disabled,true);
+  assert.match(elements.get('pen-change-title').textContent,/Red/);
+  assert.equal(calls.length,callsBeforePrompt,'Showing a pen prompt never sends motion');
+  elements.get('pen-change-confirmed').checked=true;
+  elements.get('pen-change-confirmed').onchange();
+  await elements.get('pen-change').onclick();
+  assert.deepEqual(calls.at(-1),['/api/pen-change',{id:'color-job',run:'color-run',stage:0,confirmed:true}]);
+  state.jobs[0].pending_stage=1;
+  await vm.runInContext('refresh()',sandbox);
+  assert.equal(elements.get('pen-change-confirmed').checked,false,'Each new color needs a new confirmation');
+  assert.match(elements.get('pen-change-title').textContent,/Green/);
+  const beforeDiagnostic=calls.length;
+  await elements.get('diagnostic').onclick();
+  assert.equal(calls.at(-1)[0],'/api/import');
+  assert.equal(calls.at(-1)[1].diagnostic,true);
+  assert.equal(calls.length,beforeDiagnostic+1,'Accuracy pattern only prepares; it must never start motion');
   return 'PASS: separate Prepare/Print & monitor/Calibration pages, independent preparation, upload handoff and safe navigation.';
 }
 

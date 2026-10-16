@@ -36,3 +36,17 @@ inline bool polargraphAngleInArc(float angle, float start, float sweep) {
   while (offset >= turn) offset -= turn;
   return offset <= fabsf(sweep) + 0.00001f;
 }
+
+// Sample straight interpolation in belt space against the requested XY chord.
+inline bool polargraphLineDeviation(float left,float right,float top,
+                                    const float *a,const float *b,float &deviation) {
+  const float la=hypotf(a[0]-left,a[1]-top),lb=hypotf(b[0]-left,b[1]-top);
+  const float ra=hypotf(a[0]-right,a[1]-top),rb=hypotf(b[0]-right,b[1]-top);
+  deviation=0;
+  for(int i=1;i<4;++i) {
+    const float t=i*.25f;float x,y;
+    if(!polargraphPosition(left,right,top,la+(lb-la)*t,ra+(rb-ra)*t,x,y))return false;
+    deviation=fmaxf(deviation,hypotf(x-(a[0]+(b[0]-a[0])*t),y-(a[1]+(b[1]-a[1])*t)));
+  }
+  return true;
+}

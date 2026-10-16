@@ -1,5 +1,34 @@
 # Development Progress Log
 
+## 2026-10-16 — plot-file reclamation and Stop clarification
+
+- Reclaim completed/stopped files after motion/servo settling; remove failed-commit scratch and boot orphans; expire idle partial uploads after two minutes and unstarted verified files after ten.
+- Preserve same-boot run receipts and multipart/color chain state in RAM, including retry after partial/ready expiry. Retry/report failed removals; never delete NVS settings or unrelated files.
+- Added storage usage/cleanup readout and explicitly labeled the existing fault-latching Stop as Emergency stop. Its reset/reference-restoration semantics are unchanged; Pause remains position-preserving.
+- Validation: 75 Python tests, browser checks, real PlotStore native lifecycle tests and the pinned ESP32 build pass. Source/build artifacts only; not flashed or deployed.
+- See [stored plots](STORED_PLOTS.md) for lifecycle and recovery details.
+
+
+## 2026-10-16 — red/green/blue/black manual color stages
+
+- Added bounded RGB image uploads, a local four-pen-plus-white palette converter with optional spatial dithering, aligned per-color toolpaths and colored preview/stage summaries.
+- Stored execution keeps colors in separate parts, requires a run/stage-bound manual pen confirmation initially and between colors, and persists unconfirmed stages across controller restart.
+- Existing multipart firmware API 2 is required; automatic transfers within a confirmed color retain offline recovery, while reboot/fault/calibration changes block continuation.
+- Validation: all 71 Python tests and browser logic checks pass, including pen-change gates, RGB payloads, colored preview, restart/reboot behavior and multipart color execution. No firmware source changed in this feature.
+- No live deployment, firmware flash, physical pen change or motion was performed.
+- See [color drawings](COLOR_DRAWINGS.md) for operation, palette limits and registration requirements.
+
+## 2026-10-16 — quality fixes and multipart stored execution
+
+- Implemented safe multipart stored jobs, same-boot continuation/restart reconciliation, offset/CRC/idempotent recovery, pen-up waiting and next-chain validation.
+- Preserved tiny motor moves/final endpoints, added adaptive polargraph subdivision, removed redundant pen waits and the AVR minimum pulse-rate floor on ESP32.
+- Added pen-aware preparation controls, bounded travel optimization, separate travel feed, highlight-preserving crosshatching and servo-aware estimates.
+- Added a reviewed accuracy-grid preparation action, held-out measurement analysis and IRAM/timer diagnostics; coalesced redundant controller progress journals.
+- Validation: all 63 Python tests pass with NumPy, browser logic checks pass, all five native C++ programs pass, and the pinned ESP32 firmware builds (70,012 bytes static RAM; 947,625 bytes flash).
+- Firmware SHA-256: `9ced3b4cb6edea9004aa9bdc9b373978c74b989dd4892ff3ce15ff37d1867ad7`.
+- Source and firmware artifacts only; no live deployment, flash or physical motion. Mechanical/driver calibration still requires measured hardware.
+- See [quality and efficiency](QUALITY_AND_EFFICIENCY.md) for behavior, limits and commissioning.
+
 ## 2026-10-16 — Crosshatch image style (numpy, optional)
 
 - New `image_mode: crosshatch`: up to four line directions (45/135/0/90 deg)

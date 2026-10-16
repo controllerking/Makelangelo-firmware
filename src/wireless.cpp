@@ -101,6 +101,11 @@ void state(JsonObject out) {
   out["completed"] = ledger.completed;
   out["queue_free"] = queueCapacity - count;
   out["planner_free"] = Planner::movesFree();
+  const MotionDiagnostics timing=motionDiagnostics();
+  JsonObject diagnostic=out.createNestedObject("motion_diagnostics");
+  diagnostic["isr_calls"]=timing.pulses;diagnostic["max_isr_us"]=timing.maxIsrUs;
+  diagnostic["max_latency_us"]=timing.maxLatencyUs;diagnostic["interval_clamps"]=timing.intervalClamps;
+  diagnostic["planner_drains"]=timing.plannerDrains;
   out["homed"] = wallPositionKnown();
   out["reference"] = wallUserReference() ? "user" : (wallPositionKnown() ? "switches" : "unknown");
   out["calibration_api"] = 1;
@@ -117,7 +122,7 @@ void state(JsonObject out) {
   out["fault"] = wallStopped();
   out["paused"] = paused;
   out["holding"] = hold;
-  out["busy"] = bool(count || planner.movesPlanned() || dispatching || plotStore.active() || plotStore.uploading());
+  out["busy"] = bool(count || planner.movesPlanned() || dispatching || plotStore.active() || plotStore.uploading() || plotStore.waiting());
   out["moving"] = bool(planner.movesPlanned() || dispatching || restoring || wallIsHoming());
   out["homing"] = wallIsHoming();
   out["x"] = axies[0].pos; out["y"] = axies[1].pos;
@@ -185,7 +190,7 @@ void handleLine(const char *raw) {
       error("unauthorized"); client.stop(); return;
     }
     if (session.length() && session != candidate &&
-        (count || planner.movesPlanned() || hold || plotStore.active() || plotStore.uploading() || ledger.completed != ledger.next - 1)) {
+        (count || planner.movesPlanned() || hold || plotStore.active() || plotStore.uploading() || plotStore.waiting() || ledger.completed != ledger.next - 1)) {
       error("session_busy"); client.stop(); return;
     }
     if (session != candidate) {
@@ -249,7 +254,7 @@ void handleLine(const char *raw) {
     reply["op"] = type; state(reply.as<JsonObject>()); writeJson(reply); return;
   }
   if (type != "command") { error("unknown_type"); return; }
-  if(plotStore.active() || plotStore.uploading()) {error("stored_plot_owns_motion");return;}
+  if(plotStore.active() || plotStore.uploading() || plotStore.waiting()) {error("stored_plot_owns_motion");return;}
   if (String(doc["boot"] | "") != bootId) { error("boot_changed"); return; }
   if (!doc["id"].is<uint32_t>()) { error("invalid_id"); return; }
   const uint32_t id = doc["id"];
@@ -378,6 +383,9 @@ void setupRoutes() {
     }
     // Move this network to the front, retaining up to two other known networks.
     int existing = -1;
+    if(!idle() || count || plotStore.active() || plotStore.waiting() || plotStore.uploading()) {
+      portalReply(409,"Stop the drawing before changing Wi-Fi settings.");return;
+    }
     for (int i = 0; i < 3; ++i) if (savedSsid[i] == ssid) existing = i;
     if (existing < 0) existing = 2;
     for (int i = existing; i > 0; --i) {
@@ -476,11 +484,11 @@ void wirelessBegin() {
     joining = true; joinStarted = millis(); retryAt = millis() + 30000;
   } else beginSetup();
 }
-bool wirelessOwnsMotion() { return authenticated || count || hold || plotStore.active() || plotStore.uploading(); }
+bool wirelessOwnsMotion() { return authenticated || count || hold || plotStore.active() || plotStore.uploading() || plotStore.waiting(); }
 bool wirelessHoldMotion() { return hold; }
 bool wirelessSetupRequested(const char *raw) {
   if (strcmp(raw, "WIFI SETUP")) return false;
-  if (!idle() || count || plotStore.active() || plotStore.uploading()) { SERIAL_ECHOLNPGM("Finish/stop the job before Wi-Fi setup."); return true; }
+  if (!idle() || count || plotStore.active() || plotStore.uploading() || plotStore.waiting()) { SERIAL_ECHOLNPGM("Finish/stop the job before Wi-Fi setup."); return true; }
   beginSetup();
   // Also repeat details when setup was already advertising before USB opened.
   MYSERIAL1.println(setupName.c_str());
@@ -529,6 +537,8 @@ void wirelessPoll() {
 }
 void wirelessAdvance() {
   if (!started || dispatching) return;
+  // SPIFFS cleanup is deferred until motors and the pen ramp have settled.
+  if(!planner.movesPlanned() && !wallIsHoming() && !servos[0].moving())plotStore.service();
   if (wallStopped()) {
     plotStore.stop("fault");
     count = 0; hold = paused = true; penSettling = restoring = false; return;
@@ -593,8 +603,11 @@ void wirelessAdvance() {
     penSettling=true;settleUntil=millis()+300;return;
   } else if (!strcmp(cmd.op, "pen")) {
     if (planner.movesPlanned()) return;
-    motor.setPenAngle(cmd.angle); servos[0].update();
-    penSettling = true; settleUntil = millis() + 300; return;
+    // Equal targets need no new dwell; an in-progress ramp still must finish.
+    if(servos[0].read()!=cmd.angle || servos[0].moving()) {
+      motor.setPenAngle(cmd.angle); servos[0].update();
+      penSettling = true; settleUntil = millis() + 300; return;
+    }
   } else if (!strcmp(cmd.op, "sync")) {
     if (planner.movesPlanned()) return;
   } else if (!strcmp(cmd.op, "home")) {

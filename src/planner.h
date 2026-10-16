@@ -25,7 +25,11 @@
 #define MINIMUM_PLANNER_SPEED 0.05  // (mm/s)
 
 #define BLOCK_DELAY_FOR_1ST_MOVE 100
+#ifdef TARGET_ESP32
+#define MIN_STEP_RATE            1  // Hardware timer supports slow, single-step segments.
+#else
 #define MIN_STEP_RATE            120
+#endif
 #define GRAVITYmag               (9800.0)
 
 //#define HAS_CLASSIC_JERK

@@ -2,7 +2,7 @@
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Drawy · Drawing studio</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
 <body>
-<header><a class="brand" href="#prepare">drawy<span>drawing studio</span></a><nav class="page-nav" aria-label="Main navigation"><a id="nav-prepare" href="#prepare">Prepare</a><a id="nav-monitor" href="#monitor">Print &amp; monitor</a><a id="nav-calibration" href="#calibration">Calibration</a></nav><div id="connection-badge" class="badge">Not connected</div><button id="header-stop" class="button danger">Stop</button></header>
+<header><a class="brand" href="#prepare">drawy<span>drawing studio</span></a><nav class="page-nav" aria-label="Main navigation"><a id="nav-prepare" href="#prepare">Prepare</a><a id="nav-monitor" href="#monitor">Print &amp; monitor</a><a id="nav-calibration" href="#calibration">Calibration</a></nav><div id="connection-badge" class="badge">Not connected</div><button id="header-stop" class="button danger">Emergency stop</button></header>
 <main>
 <section id="calibration-page" aria-labelledby="calibration-heading" hidden>
 <div class="page-heading"><p class="eyebrow">SET UP YOUR ROBOT</p><h1 id="calibration-heading" tabindex="-1">Calibrate once.<br><em>Make your mark.</em></h1><p>Set the pen positions, then capture your paper corners. Once saved and ready, you’ll move straight to Prepare.</p></div>
@@ -18,10 +18,12 @@
 <div class="panel-heading"><div><p class="eyebrow">THE DRAWING BOARD</p><h2 id="drawing-title">Your next drawing</h2></div><span id="paper-label" class="subtle">18 × 24 in</span></div>
 <div class="canvas-wrap"><canvas id="preview" aria-label="Drawing placement preview"></canvas><div id="empty-preview"><span class="scribble">∿</span><p>Bring an image to life.</p><small>Choose a photo, an illustration, an SVG, or a harmonic study.</small></div></div>
 <div class="preview-meta"><span id="drawing-details">Paper coordinates are measured in millimetres.</span><span id="estimate"></span></div>
-<div id="warning-list" class="notice" hidden></div>
+<p id="color-stage-summary" class="help" hidden></p><div id="warning-list" class="notice" hidden></div>
 </div>
 <aside>
 <section class="card" id="robot-card"><div class="panel-heading"><h2>Your robot</h2><span id="machine-state" class="subtle">Offline</span></div>
+<details><summary>Motion diagnostics</summary><p id="motion-diagnostics" class="help">Available after the firmware update.</p></details>
+<p id="plot-storage" class="help">Plot storage: waiting for device.</p>
 <p id="connection-message" class="help" role="status">Connecting automatically</p>
 <div class="machine-readout"><div><small>Position</small><span id="position">—</span></div><div><small>Pen</small><span id="pen-state">—</span></div></div>
 <div class="button-row"><button id="home" class="button secondary">Switch home (later)</button><button id="pen-up" class="button secondary">Pen up</button><button id="pen-down" class="button secondary">Pen down</button></div>
@@ -70,14 +72,25 @@
 </section>
 <section class="card"><h2>Prepare your paper</h2><form id="art-form">
 <label class="file-picker">Upload artwork<input id="svg-file" type="file" accept=".svg,.png,.jpg,.jpeg,.webp,image/svg+xml,image/png,image/jpeg,image/webp"></label><p id="file-name" class="help">PNG, JPG, WebP or SVG. Converted locally—never uploaded to a cloud service.</p>
+<label>Drawing pens<select id="color-mode"><option value="mono" selected>One pen · monochrome</option><option value="rgbk">Red, green, blue &amp; black · manual stages</option></select></label>
+<label id="color-dither-field" hidden class="review"><input id="color-dither" type="checkbox" checked> Blend the limited pen palette with spatial dithering</label>
+<p id="color-help" class="help" hidden>Color mode supports PNG, JPG and WebP. It draws one pen at a time, with black last. Each pen must have the same tip position and depth. Leave the paper and gondola fixed when swapping pens.</p>
 <label>Quality vs speed<select id="quality"><option value="fast">Fast · fewer lines</option><option value="balanced" selected>Balanced · everyday detail</option><option value="detailed">Detailed · finer marks</option></select></label>
 <p id="quality-help" class="help">A practical balance of detail and drawing time.</p>
 <div id="image-settings" hidden><label>Image style<select id="image-mode"><option value="wave" id="wave-option">Wavy line · photos (continuous, fewest pen lifts)</option><option value="crosshatch">Crosshatch · tone-layered lines, best shading, slower</option><option value="hatching">Shaded hatching · dashed, many pen lifts</option><option value="outlines">Silhouette outlines · logos & shapes</option></select></label><label id="threshold-field" hidden>Outline threshold · 1–255<input id="threshold" type="number" min="1" max="255" value="128" step="1"></label><p class="help">Transparent areas become white paper. Outlines trace dark regions, not every edge in a photo.</p></div>
 <label>Paper size<select id="paper"><option>18 × 24</option></select></label>
 <div class="field-row"><label>Paper left X · mm<input id="left" type="number" step="any" placeholder="Measured X" required></label><label>Paper top Y · mm<input id="top" type="number" step="any" placeholder="Measured Y" required></label></div>
 <div class="field-row"><label>Margin · mm<input id="margin" type="number" step=".1" value="25.4" min="0" required></label><label>Speed · mm/s<input id="feed" type="number" step=".1" value="10" min=".1" max="30" required></label></div>
+<details><summary>Pen &amp; toolpath settings</summary>
+<label>Pen width · mm<input id="pen-width" type="number" min=".05" max="3" step=".05" value=".3"></label>
+<label>Minimum mark length · mm<input id="minimum-mark" type="number" min="0" max="5" step=".05" value="0"></label>
+<label>Path tolerance · mm<input id="path-tolerance" type="number" min="0" max=".5" step=".005" value=".02"></label>
+<label>Pen-up travel speed · mm/s<input id="travel-feed" type="number" min=".1" max="30" step=".1" value="10"></label>
+<label>Crosshatch white-gap bridging · mm<input id="bridge-gap" type="number" min="0" max="5" step=".1" value="0"></label>
+<label class="review"><input id="optimize-travel" type="checkbox"> Optimize SVG / outline travel</label>
+<p class="help">Travel speed remains within the robot’s existing limit. Increase it only after checking motion on your assembled machine. Zero gap bridging preserves highlights.</p></details>
 <p class="help">Y increases upward. Paper below the motor centres usually has a negative top Y. Measure the placement on your machine.</p>
-<button id="prepare" class="button primary">Convert & preview</button><button id="demo" type="button" class="button secondary wide">Try a harmonic study</button>
+<button id="prepare" class="button primary">Convert & preview</button><button id="diagnostic" type="button" class="button secondary wide">Prepare accuracy grid</button><button id="demo" type="button" class="button secondary wide">Try a harmonic study</button>
 </form></section>
 </aside>
 </section>
@@ -85,7 +98,7 @@
 </div>
 <section id="monitor-page" hidden aria-labelledby="monitor-heading">
 <div class="page-heading"><p class="eyebrow">02 · PRINT &amp; MONITOR</p><h1 id="monitor-heading" tabindex="-1">Your robot.<br><em>At work.</em></h1><p>Track uploads and drawings, adjust live speeds and control the machine. Preparing the next image won’t change the active job.</p></div>
-<div class="monitor-layout"><section class="card monitor-job"><p class="eyebrow" id="monitor-job-state">NO JOB SELECTED</p><h2 id="monitor-job-title">No active drawing</h2><p id="monitor-job-details" class="help">Prepare an image or select a job from the queue.</p><h3 id="job-message">Ready when you are.</h3><progress id="progress" value="0" max="100"></progress><p id="progress-label" class="help" role="status">No active drawing</p><div class="button-row"><button id="pause" class="button secondary">Pause</button><button id="resume" class="button secondary">Resume</button><button id="stop" class="button danger">Stop</button></div><p class="help">Pause drains buffered movement and lifts the pen. Stop requires a robot reset. Remote controls require a connection, even when a stored plot runs independently.</p><div class="button-row"><a class="button secondary" href="#prepare">Prepare another drawing →</a><button id="monitor-review" class="button secondary">Review selected job in Prepare</button></div></section><div id="monitor-controls"></div></div>
+<div class="monitor-layout"><section class="card monitor-job"><p class="eyebrow" id="monitor-job-state">NO JOB SELECTED</p><h2 id="monitor-job-title">No active drawing</h2><p id="monitor-job-details" class="help">Prepare an image or select a job from the queue.</p><section id="pen-change-panel" class="notice" hidden><strong id="pen-change-title"></strong><p>Wait until motion has stopped. Swap the pen without moving the paper or gondola; match its tip position and depth.</p><label class="review"><input id="pen-change-confirmed" type="checkbox"> The requested pen is installed securely at the same tip depth.</label><button id="pen-change" class="button primary">Confirm pen &amp; draw stage</button></section><h3 id="job-message">Ready when you are.</h3><progress id="progress" value="0" max="100"></progress><p id="progress-label" class="help" role="status">No active drawing</p><div class="button-row"><button id="pause" class="button secondary">Pause</button><button id="resume" class="button secondary">Resume</button><button id="stop" class="button danger">Emergency stop</button></div><p class="help">Pause drains buffered movement and lifts the pen so it can resume. Emergency stop cuts motion, disables motors and requires reset plus position restoration. Large jobs draw in parts. If the controller disconnects, the robot finishes the current part, lifts the pen and waits for the next. Keep the controller running for automatic continuation. Remote controls require a connection.</p><div class="button-row"><a class="button secondary" href="#prepare">Prepare another drawing →</a><button id="monitor-review" class="button secondary">Review selected job in Prepare</button></div></section><div id="monitor-controls"></div></div>
 <section class="queue-section"><div class="panel-heading"><h2>The drawing queue</h2><span class="subtle">Prepared here, drawn on your wall.</span></div><div id="queue" class="queue"><p class="help">Your prepared drawings will appear here.</p></div></section>
 </section>
 <div id="toast" role="status" aria-live="polite" hidden></div>

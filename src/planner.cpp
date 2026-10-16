@@ -815,8 +815,16 @@ bool Planner::populateBlock(Segment *newBlock,const float *const target, float f
   }
 
   // No steps?  No work!  Stop now.
+#ifdef TARGET_ESP32
+  if(!newBlock->steps_total) return false;
+  // A preceding target may quantize to zero steps. Account for its distance.
+  float actualSquared=0;
+  for(ALL_AXIES(i)) actualSquared+=sq(deltaCartesian[i]);
+  cartesianDistance=sqrtf(actualSquared);
+  if(cartesianDistance<=0) return false;
+#else
   if(newBlock->steps_total < MIN_STEPS_PER_SEGMENT) return false;
-
+#endif
   newBlock->distance = cartesianDistance;
 
   // record the new target position & feed rate for the next movement.
@@ -1004,6 +1012,25 @@ void Planner::addSegment(const float *const target_position, float fr_units_s, f
    @input pos NUM_AXIES floats describing destination coordinates
    @input new_feed_rate speed to travel along arc
 */
+#if defined(TARGET_ESP32) && MACHINE_STYLE == POLARGRAPH
+static void adaptivePolargraphLine(const float *a,const float *b,float feed,int depth=0) {
+  if(wallStopped() || wirelessHoldMotion())return;
+  float midpoint[NUM_AXIES];
+  for(ALL_AXIES(i))midpoint[i]=(a[i]+b[i])*.5f;
+  const float left=axies[0].limitMin,right=axies[0].limitMax,top=axies[1].limitMax;
+  float deviation=0;
+  if(!polargraphLineDeviation(left,right,top,a,b,deviation)) {wallEmergencyStop();return;}
+  const float length=hypotf(b[0]-a[0],b[1]-a[1]);
+  // 0.025 mm sampled geometric tolerance; 5 mm leaves limit lookahead/service work.
+  if((deviation>.025f || length>5.f) && depth<16) {
+    adaptivePolargraphLine(a,midpoint,feed,depth+1);
+    adaptivePolargraphLine(midpoint,b,feed,depth+1);
+  } else {
+    if(deviation>.025f) {wallEmergencyStop();return;}
+    Planner::addSegment(b,feed,length);
+  }
+}
+#endif
 void Planner::bufferLine(float *pos, float new_feed_rate_units) {
 #ifdef TARGET_ESP32
   if (!wallMoveAllowed(pos) || !isfinite(new_feed_rate_units) || new_feed_rate_units <= 0) return;
@@ -1019,6 +1046,13 @@ void Planner::bufferLine(float *pos, float new_feed_rate_units) {
   new_feed_rate_units *= (float)speed_adjust * 0.01f;
 #endif
 
+#if defined(TARGET_ESP32) && MACHINE_STYLE == POLARGRAPH
+  if(pos[0]!=axies[0].pos || pos[1]!=axies[1].pos) {
+    float start[NUM_AXIES];for(ALL_AXIES(i))start[i]=axies[i].pos;
+    adaptivePolargraphLine(start,pos,new_feed_rate_units);
+    return;
+  }
+#endif
   // split up long lines to make them straighter
   float deltaCartesian[NUM_AXIES];
   float intermediatePos[NUM_AXIES];
