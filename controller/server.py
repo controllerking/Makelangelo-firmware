@@ -167,16 +167,19 @@ class Controller:
                                         "boot":d["boot"],"corners":{}}
             elif action=="restore":
                 if not self.calibration: raise ValueError("No saved paper calibration")
-                if data.get("at_top_left") is not True: raise ValueError("Place the pen at the saved top-left point and confirm")
+                name=data.get("corner","top_left")
+                if name not in CORNERS: raise ValueError("Choose one of the four saved corners")
+                if data.get("at_corner",data.get("at_top_left")) is not True:
+                    raise ValueError("Place the pen at the saved %s point and confirm" % name.replace("_"," "))
                 if list(d.get("steps_per_mm",[]))!=self.calibration["spu"]:
                     raise ValueError("Motor scale changed; recalibrate all corners")
-                await send(reference_command(self.calibration,self.calibration["corners"]["top_left"]["belts"]))
+                await send(reference_command(self.calibration,self.calibration["corners"][name]["belts"]))
                 if self.link.state.get("calibration_id")!=self.calibration["id"]: raise DeviceError("Reference restore failed")
                 self.calibration_draft=None
             else:
                 draft=self.calibration_draft
                 if not draft or draft["boot"]!=d.get("boot") or not d.get("calibrating"):
-                    raise ValueError("Calibration position was lost; begin again (or restore a saved top-left reference)")
+                    raise ValueError("Calibration position was lost; begin again (or restore from one saved corner)")
                 if action=="jog":
                     axis=data.get("axis")
                     if type(axis) is not int or axis not in (0,1): raise ValueError("Choose the left or right motor")
@@ -296,9 +299,6 @@ class Controller:
         else:
             paths, warnings = svg_paths(str(data.get("svg", "")))
             title = str(data.get("name", "Untitled drawing"))[:120]
-        if device.get("reference") == "manual":
-            options["feed"] = min(2., finite(options["feed"], "feed"))
-            warnings.append("Temporary manual reference: speed capped at 2 mm/s; its limited travel envelope still applies.")
         prepared = prepare(paths, options, device.get("pen_up",90), device.get("pen_down",40), source_bounds)
         prepared.update(metadata, path_count=len(paths), feed=float(options["feed"]))
         prepared["calibration_id"]=self.calibration["id"] if self.calibration else None

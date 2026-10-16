@@ -41,10 +41,7 @@ bool wallSavePenAngles(int up,int down) {
 static bool positionKnown = false;
 static bool stopped = false;
 static bool findingHome = false;
-static bool manualReference = false;
-static bool manualGeometry = false;
-static float manualX = 0, manualY = 0;
-static float manualExtent = 10;
+static bool referenceGeometry = false;
 static float savedBounds[4];
 static bool userReference = false, calibrating = false;
 static int32_t calibrationSteps[2] = {0,0};
@@ -54,7 +51,6 @@ static char calibrationId[37] = {};
 bool wallStopped() { return stopped; }
 bool wallIsHoming() { return findingHome; }
 bool wallPositionKnown() { return positionKnown; }
-bool wallManualReference() { return manualReference; }
 bool wallUserReference() { return userReference; }
 const char *wallCalibrationId() { return userReference ? calibrationId : ""; }
 bool wallCalibrationActive() { return calibrating; }
@@ -64,11 +60,10 @@ void wallCalibrationAbort() { calibrating = false; penTuning=false; }
 void wallInvalidatePosition() {
   positionKnown = false;
   calibrating = false;
-  if (manualReference || userReference) {
+  if (userReference) {
     axies[0].limitMin = savedBounds[0]; axies[0].limitMax = savedBounds[1];
     axies[1].limitMin = savedBounds[2]; axies[1].limitMax = savedBounds[3];
   }
-  manualReference = false;
   userReference = false;
 }
 
@@ -128,33 +123,8 @@ bool wallSetUserReference(float width, float left, float right, const float *bou
   motor.engage();
   float pos[NUM_AXIES]={x,y,float(wallPenUpAngle())};
   teleport(pos);
-  userReference = manualGeometry = positionKnown = true;
+  userReference = referenceGeometry = positionKnown = true;
   desiredFeedRate=DEFAULT_FEEDRATE;
-  return true;
-}
-
-bool wallSetManualReference(float width, float left, float right, float extent) {
-  float x, y;
-  if (stopped || findingHome || !wallHardwareReady() || planner.movesPlanned() ||
-      wirelessOwnsMotion() || !isfinite(width) || width < 100 || width > 2000 ||
-      left > 3000 || right > 3000 || !isfinite(extent) || extent < 1 || extent > 80 ||
-      !polargraphPosition(0, width, 0, left, right, x, y) ||
-      x < 20 || x > width-20 || y > -50 || y < -2000) return false;
-  // RAM only. Never overwrite measured switch references or EEPROM geometry.
-  wallInvalidatePosition();
-  savedBounds[0] = axies[0].limitMin; savedBounds[1] = axies[0].limitMax;
-  savedBounds[2] = axies[1].limitMin; savedBounds[3] = axies[1].limitMax;
-  axies[0].limitMin = 0; axies[0].limitMax = width;
-  axies[1].limitMin = y-extent; axies[1].limitMax = 0;
-  float position[NUM_AXIES] = {x, y, axies[2].pos};
-  motor.engage();
-  teleport(position);
-  manualX = x; manualY = y;
-  manualExtent = extent;
-  manualReference = manualGeometry = positionKnown = true;
-  desiredFeedRate = 2;
-  SERIAL_ECHOLNPGM("MANUAL reference: RAM only, bounded envelope, 2mm/s maximum. Reset before homing.");
-  SERIAL_ECHOLNPAIR("Manual envelope +/- mm: ", manualExtent);
   return true;
 }
 
@@ -201,10 +171,6 @@ bool wallMoveAllowed(const float *pos) {
     SERIAL_ECHOLNPGM("Motion blocked: configure hardware and home with G28.");
     return false;
   }
-  if (manualReference && !polargraphManualTarget(pos[0], pos[1], manualX, manualY, manualExtent)) {
-    SERIAL_ECHOLNPGM("Motion blocked: outside manual envelope.");
-    return false;
-  }
   if (userReference && !userCalibrationContains(pos[0],pos[1],drawingBounds)) {
     SERIAL_ECHOLNPGM("Motion blocked: outside user-calibrated paper envelope.");
     return false;
@@ -233,8 +199,8 @@ static bool homeFault(const char *message) {
 
 bool wallHome() {
   if (stopped || !wallHardwareReady()) return false;
-  if (manualGeometry) {
-    SERIAL_ECHOLNPGM("G28 blocked: reset to discard temporary manual geometry first.");
+  if (referenceGeometry) {
+    SERIAL_ECHOLNPGM("G28 blocked: reset to discard the calibrated reference geometry first.");
     return false;
   }
   if (!WALL_HOMING_CONFIRMED) {

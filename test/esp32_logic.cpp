@@ -17,14 +17,6 @@ static void testGeometry() {
   assert(!userCalibrationContains(199.99f,-450,bounds));
   assert(!userCalibrationContains(200,-450.01f,bounds));
   assert(polargraphPosition(0, 644.525f, 0, 381, 406.4f, x, y));
-  assert(polargraphManualTarget(x+10, y-10, x, y));
-  assert(!polargraphManualTarget(x+10.1f, y, x, y));
-  assert(!polargraphManualTarget(x, y-10.1f, x, y));
-  assert(!polargraphManualTarget(NAN, y, x, y));
-  assert(polargraphManualTarget(x+76.2f, y-76.2f, x, y, 80));
-  assert(!polargraphManualTarget(x+80.1f, y, x, y, 80));
-  assert(!polargraphManualTarget(x, y, x, y, 81));
-  assert(!polargraphManualTarget(x, y, x, y, NAN));
   assert(polargraphPosition(-400, 400, 100, 500, 500, x, y));
   assert(fabsf(x) < 0.001f && fabsf(y + 200) < 0.001f);
   assert(!polargraphPosition(0, 0, 0, 100, 100, x, y));

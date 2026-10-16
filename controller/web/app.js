@@ -74,7 +74,7 @@ function render() {
   const d=snapshot.device, connected=snapshot.connected, active=snapshot.jobs.find(j=>j.id===snapshot.active);
   $('connection-badge').textContent=snapshot.simulation?'Simulation · no hardware':connected?'Robot connected':'Not connected';
   $('connection-badge').classList.toggle('online',connected);
-  $('machine-state').textContent=!connected?'Offline':d.fault?'Reset required':d.homing?'Homing':d.paused?'Paused':d.reference==='manual'?'Manual reference':d.homed?'Homed':'Needs homing';
+  $('machine-state').textContent=!connected?'Offline':d.fault?'Reset required':d.homing?'Homing':d.paused?'Paused':d.homed?'Homed':'Needs homing';
   $('prepare').disabled=preparing; $('demo').disabled=preparing;
   $('prepare').textContent=preparing?'Converting…':'Convert & preview';
   $('position').textContent=connected && Number.isFinite(d.x)?d.x.toFixed(1)+', '+d.y.toFixed(1)+' mm'+(d.position_kind==='planned'?' · target':''):'—';
@@ -142,7 +142,7 @@ function renderCalibration() {
   const count=valid?Object.keys(draft.corners).length:0;
   $('calibration-status').textContent=!snapshot.connected?'Robot offline. Saved calibration is retained.':d.calibration_api!==1?'Update ESP32 firmware to enable manual calibration.':valid?
     count+'/4 corners captured. '+(count<4?'Next: '+cornerNames[count].replaceAll('_',' '):'All captured; validate and save.'):
-    saved?(d.calibration_id===saved.id && d.homed?'Calibrated · normal drawing speeds enabled.':'Saved paper calibration · restore the top-left reference before drawing.'):'No saved calibration. Start with the pen lifted.';
+    saved?(d.calibration_id===saved.id && d.homed?'Calibrated · normal drawing speeds enabled.':'Saved paper calibration · restore position at one saved corner before drawing.'):'No saved calibration. Start with the pen lifted.';
   $('cal-begin').disabled=!idle || !$('cal-confirmed').checked || !!snapshot.pen_draft || !!d.pen_tuning;
   $('cal-width').disabled=$('cal-paper').disabled=calibrationBusy;
   $('cal-jog-panel').hidden=!valid;
@@ -153,6 +153,7 @@ function renderCalibration() {
   $('cal-finish').disabled=!idle || !valid || count!==4;
   $('cal-restore-panel').hidden=!saved;
   $('cal-restore').disabled=!idle || !$('cal-at-reference').checked;
+  $('cal-restore').textContent='Restore position at '+$('cal-restore-corner').value.replaceAll('_',' ');
 }
 async function calibrate(body){
   if(calibrationBusy)return;
@@ -298,8 +299,8 @@ for(const [id,axis,sign] of [['cal-left-in',0,-1],['cal-left-out',0,1],['cal-rig
   $(id).onclick=()=>calibrate({action:'jog',axis,mm:sign*Number($('cal-distance').value)});
 $('cal-capture').onclick=()=>calibrate({action:'capture',corner:cornerNames[Object.keys(snapshot.calibration_draft?.corners||{}).length]});
 $('cal-finish').onclick=()=>calibrate({action:'finish'});
-$('cal-restore').onclick=()=>calibrate({action:'restore',at_top_left:$('cal-at-reference').checked});
-$('cal-confirmed').onchange=$('cal-at-reference').onchange=render;
+$('cal-restore').onclick=()=>calibrate({action:'restore',corner:$('cal-restore-corner').value,at_corner:$('cal-at-reference').checked});
+$('cal-confirmed').onchange=$('cal-at-reference').onchange=$('cal-restore-corner').onchange=render;
 $('pen-cal-confirmed').onchange=render;
 $('pen-cal-begin').onclick=()=>calibratePen({action:'begin',confirmed:$('pen-cal-confirmed').checked});
 for(const [id,delta] of [['pen-minus-thirty',-30],['pen-minus-ten',-10],['pen-minus-five',-5],['pen-minus-one',-1],['pen-plus-one',1],['pen-plus-five',5],['pen-plus-ten',10],['pen-plus-thirty',30]])

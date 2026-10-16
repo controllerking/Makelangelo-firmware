@@ -21,13 +21,6 @@ inline long polargraphSteps(float x, float y, float anchorX,
   return lroundf(sqrtf(dx*dx + dy*dy) * stepsPerMm);
 }
 
-// Deliberately tiny commissioning envelope, not a replacement for homing.
-inline bool polargraphManualTarget(float x, float y, float originX, float originY, float extent = 10.0f) {
-  return isfinite(x) && isfinite(y) && isfinite(originX) && isfinite(originY) &&
-    isfinite(extent) && extent >= 1 && extent <= 80 &&
-    fabsf(x-originX) <= extent && fabsf(y-originY) <= extent;
-}
-
 inline float polargraphArcSweep(float start, float end, bool clockwise) {
   const float turn = 6.28318530718f;
   float sweep = end - start;

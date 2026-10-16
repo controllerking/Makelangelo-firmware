@@ -116,6 +116,18 @@ class CalibrationIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.c.calibration_action({"action":"restore","at_top_left":True})
         self.c.validate_job(self.c.jobs[job["id"]])
         self.assertAlmostEqual(self.c.link.state["x"],cal["corners"]["top_left"]["xy"][0],places=4)
+        # One captured corner is enough: any saved corner re-establishes the reference.
+        self.robot.reboot()
+        for _ in range(50):
+            if not self.c.link.connected:break
+            await asyncio.sleep(.01)
+        await self.c.connect()
+        with self.assertRaises(ValueError):await self.c.calibration_action({"action":"restore","corner":"bottom_right"})
+        with self.assertRaises(ValueError):await self.c.calibration_action({"action":"restore","corner":"middle","at_corner":True})
+        await self.c.calibration_action({"action":"restore","corner":"bottom_right","at_corner":True})
+        self.assertAlmostEqual(self.c.link.state["x"],cal["corners"]["bottom_right"]["xy"][0],places=4)
+        self.assertAlmostEqual(self.c.link.state["y"],cal["corners"]["bottom_right"]["xy"][1],places=4)
+        self.c.validate_job(self.c.jobs[job["id"]])
         restored=Controller(Path(self.temp.name),self.config)
         self.assertEqual(restored.calibration["id"],cal["id"])
         await restored.close()

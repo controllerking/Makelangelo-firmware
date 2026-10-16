@@ -102,7 +102,7 @@ void state(JsonObject out) {
   out["queue_free"] = queueCapacity - count;
   out["planner_free"] = Planner::movesFree();
   out["homed"] = wallPositionKnown();
-  out["reference"] = wallUserReference() ? "user" : (wallManualReference() ? "manual" : (wallPositionKnown() ? "switches" : "unknown"));
+  out["reference"] = wallUserReference() ? "user" : (wallPositionKnown() ? "switches" : "unknown");
   out["calibration_api"] = 1;
   out["switch_homing_enabled"] = bool(WALL_HOMING_CONFIRMED);
   out["calibrating"] = wallCalibrationActive();

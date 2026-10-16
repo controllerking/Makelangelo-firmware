@@ -320,8 +320,8 @@ void Parser::processCommand() {
       SERIAL_ECHOLNPGM("Raw GPIO commands disabled on wall machine.");
       return;
     }
-    if (cmd == 500 && (wallManualReference() || wallUserReference())) {
-      SERIAL_ECHOLNPGM("M500 blocked: temporary manual geometry must not be saved.");
+    if (cmd == 500 && wallUserReference()) {
+      SERIAL_ECHOLNPGM("M500 blocked: calibrated reference geometry must not be saved.");
       return;
     }
     if (cmd == 92 || cmd == 101 || cmd == 501 || cmd == 502) wallInvalidatePosition();
@@ -340,14 +340,6 @@ void Parser::processCommand() {
       case 110:        M110();        break;
       case 112:        M112();        break;
       case 114:        M114();        break;
-#ifdef TARGET_ESP32
-      case 665:
-        if (parseInt('C', 0) != 1 ||
-            !wallSetManualReference(parseFloat('W', NAN), parseFloat('L', NAN), parseFloat('R', NAN), parseFloat('S', 10)))
-          SERIAL_ECHOLNPGM("Manual reference rejected. Use M665 W<spacing> L<left> R<right> S<1..80> C1 in mm, idle USB only.");
-        M114();
-        break;
-#endif
 #ifdef HAS_LCD
       case 117:        M117();        break;
 #endif
@@ -1027,7 +1019,7 @@ void Parser::M114() {
 
   SERIAL_EOL();
 #ifdef TARGET_ESP32
-  SERIAL_ECHOPAIR("Position ", wallUserReference() ? "USER CALIBRATED" : (wallManualReference() ? "MANUAL" : (wallPositionKnown() ? "HOMED" : "UNKNOWN")));
+  SERIAL_ECHOPAIR("Position ", wallUserReference() ? "USER CALIBRATED" : (wallPositionKnown() ? "HOMED" : "UNKNOWN"));
   SERIAL_ECHOPAIR(" Stop ", wallStopped() ? "LATCHED" : "CLEAR");
   if (wallHardwareReady()) {
     SERIAL_ECHOPAIR(" Switch L ", digitalRead(LIMIT_SWITCH_PIN_LEFT));

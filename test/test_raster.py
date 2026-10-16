@@ -79,16 +79,15 @@ class RasterTests(unittest.TestCase):
 
 
 class RasterControllerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_manual_speed_cap_is_in_estimate(self):
+    async def test_legacy_manual_reference_no_longer_caps_speed(self):
         with tempfile.TemporaryDirectory() as temp:
             c=Controller(Path(temp))
             try:
                 data={"image":image(),"options":dict(OPTIONS,quality="fast")}
                 normal=c.build_artwork(data,{})
-                manual=c.build_artwork(data,{"reference":"manual"})
-                self.assertEqual(manual["feed"],2)
-                self.assertGreater(manual["estimated_seconds"],normal["estimated_seconds"])
-                self.assertTrue(any("manual reference" in w for w in manual["warnings"]))
+                legacy=c.build_artwork(data,{"reference":"manual"})
+                self.assertEqual(legacy["feed"],normal["feed"])
+                self.assertFalse(any("manual reference" in w for w in legacy["warnings"]))
             finally: await c.close()
 
     async def test_import_metadata_history_and_no_motion(self):

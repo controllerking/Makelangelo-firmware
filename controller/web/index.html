@@ -63,9 +63,10 @@
 <p id="cal-counts" class="help"></p><button id="cal-capture" class="button primary wide">Capture top-left</button>
 <button id="cal-finish" class="button primary wide" disabled>Validate & save corners</button>
 <p class="help">Jogs ramp up to 20 mm/s and are bounded to 50 mm per click; there is no automatic edge seeking. Check clearance before large jogs. Stop cancels motion and requires a reset. Keep the power switch accessible.</p></div>
-<div id="cal-restore-panel" hidden><p class="help">After reset, position is unknown. Jog to the exact saved top-left reference, or place it there before enabling motors. Then confirm below. Never restore at an arbitrary point.</p>
-<label class="review"><input id="cal-at-reference" type="checkbox"> The pen-tip reference is at the saved top-left corner, with unchanged paper, belt routing and motor geometry.</label>
-<button id="cal-restore" class="button secondary wide">Restore position at top-left</button></div>
+<div id="cal-restore-panel" hidden><p class="help">After reset, position is unknown. Your saved calibration already knows all four corners, so you only need to capture one: jog the pen-tip reference to any one saved corner (or place it there before enabling motors), choose that corner, then confirm below. Never restore at an arbitrary point, and not if the paper has moved.</p>
+<label>Corner the pen is on<select id="cal-restore-corner"><option value="top_left" selected>Top left</option><option value="top_right">Top right</option><option value="bottom_right">Bottom right</option><option value="bottom_left">Bottom left</option></select></label>
+<label class="review"><input id="cal-at-reference" type="checkbox"> The pen-tip reference is exactly at that saved corner, with unchanged paper, belt routing and motor geometry.</label>
+<button id="cal-restore" class="button secondary wide">Restore position at top left</button></div>
 </section>
 <section class="card"><h2>Prepare your paper</h2><form id="art-form">
 <label class="file-picker">Upload artwork<input id="svg-file" type="file" accept=".svg,.png,.jpg,.jpeg,.webp,image/svg+xml,image/png,image/jpeg,image/webp"></label><p id="file-name" class="help">PNG, JPG, WebP or SVG. Converted locally—never uploaded to a cloud service.</p>

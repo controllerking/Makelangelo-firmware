@@ -87,7 +87,7 @@ const char *PlotStore::validate(const char *path,uint32_t count,uint32_t expecte
       if(!plotRecordValid(r))return "invalid_plot_record";
       if(r.op==0) {
         float target[NUM_AXIES]={r.x,r.y,float(wallPenUpAngle())};
-        if(!wallMoveAllowed(target) || (wallManualReference() && r.feed>2))return "plot_outside_calibration";
+        if(!wallMoveAllowed(target))return "plot_outside_calibration";
       } else if(r.op==1 || r.op==2)lastPen=r.op;
       if(++index==count && (r.op!=3 || lastPen!=1))return "plot_must_finish_pen_up_sync";
     }

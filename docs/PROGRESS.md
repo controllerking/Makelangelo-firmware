@@ -1,5 +1,20 @@
 # Development Progress Log
 
+## 2026-10-16 — manual-reference mode removed; restore from any saved corner
+
+- Removed the temporary manual-reference commissioning mode: USB `M665`,
+  `wallSetManualReference`, the +/-10 mm (up to 80) envelope, the 2 mm/s firmware
+  planner and stored-plot caps, the controller's 2 mm/s artwork cap/warning,
+  the `reference: manual` status and `MANUAL_COMMISSIONING.md`. Four-corner user
+  calibration is the only non-switch reference. Its envelope and existing
+  firmware feed/acceleration limits are unchanged.
+- Position restore after reset now works from any one saved corner (UI corner
+  selector; API `corner` + `at_corner`, `at_top_left` still accepted), since the
+  saved calibration holds all four. Requires unchanged paper; otherwise recalibrate.
+- Python suite (47 tests) passes, including restore at bottom-right after a
+  reboot. **Firmware not compiled or flashed**: no C++ toolchain on the editing
+  machine; build (`pio run`) and run `test/esp32_logic.cpp` before flashing.
+
 ## 2026-10-14 — slicer-style Prepare and Print/monitor separation
 
 - Split preparation from monitoring into separate header routes, alongside

@@ -1008,7 +1008,6 @@ void Planner::bufferLine(float *pos, float new_feed_rate_units) {
 #ifdef TARGET_ESP32
   if (!wallMoveAllowed(pos) || !isfinite(new_feed_rate_units) || new_feed_rate_units <= 0) return;
   new_feed_rate_units = _MIN(new_feed_rate_units, MAX_FEEDRATE);
-  if (wallManualReference()) new_feed_rate_units = _MIN(new_feed_rate_units, 2.0f);
   motor.engage();
 #endif
   // Remember the feed rate.  This value will be used whenever no feedrate is given in a command, so it MUST be saved
@@ -1098,7 +1097,6 @@ void Planner::bufferArc(float cx, float cy, float *destination, char clockwise, 
   if (!wallMoveAllowed(destination) || !isfinite(cx) || !isfinite(cy) ||
       !isfinite(new_feed_rate_units) || new_feed_rate_units <= 0) return;
   new_feed_rate_units = _MIN(new_feed_rate_units, MAX_FEEDRATE);
-  if (wallManualReference()) new_feed_rate_units = _MIN(new_feed_rate_units, 2.0f);
 #endif
   // get radius
   float dx = axies[0].pos - cx;

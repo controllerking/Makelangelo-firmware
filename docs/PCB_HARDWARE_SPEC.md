@@ -447,5 +447,5 @@ network, exposed-pad thermal layout and a new compliance/thermal review. Do not
 copy this module-level pin table as an IC pad-level schematic.
 
 Related operational documents: [wiring and setup](ESP32_WIRING_AND_SETUP.md),
-[manual commissioning](MANUAL_COMMISSIONING.md), and
+[user calibration](USER_CALIBRATION.md), and
 [wireless protocol](WIRELESS_CONTROL.md).

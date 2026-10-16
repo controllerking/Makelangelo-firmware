@@ -80,7 +80,7 @@ not force/pressure sensing.
    spacing and pulley scale; acceptance does not certify drawing accuracy.
 8. On acceptance, paper placement is filled/locked from the saved calibration,
    the device reports `reference: user`, and normal speed presets are enabled.
-   The old temporary +/-80 mm envelope and 2 mm/s drawing cap no longer apply.
+   The former temporary manual-reference mode (`M665`, +/-10 mm envelope, 2 mm/s cap) has been removed.
    Artwork is mapped bilinearly into the captured quadrilateral. Firmware
    limits drawing to its axis-aligned envelope plus a 3 mm model
    tolerance, 30 mm/s maximum and existing acceleration limits. Keep positive
@@ -95,12 +95,21 @@ suspended load; keep it mechanically retained.
 
 ## Subsequent boots / position recovery
 
-Keep the paper and mechanics unchanged. If needed, use Begin plus bounded jogs
-to return to the **same saved top-left reference point**, without capturing new
-corners. Check the explicit top-left-position confirmation and click **Restore
-position at top-left**. This sets the known belt reference without an XY move,
-retains the saved corners and restores normal drawing speeds. If already
-physically positioned there, no jog session is required.
+The saved calibration already holds all four corners, so recovery needs only
+**one** of them. Keep the paper and mechanics unchanged. If needed, use Begin
+plus bounded jogs to put the pen-tip reference on **any one saved corner**
+(top-left, top-right, bottom-right or bottom-left), choose that corner in the
+restore panel, check the confirmation and click **Restore position**. This sets
+the known belt reference without an XY move, retains the saved corners and
+restores normal drawing speeds. If already physically positioned on a corner, no
+jog session is required.
+
+One corner is enough only because the paper has not moved: after a reset the
+absolute belt lengths are unknown, and a single point can fix them only by
+matching a saved corner. If the paper moved, or you are not exactly on a saved
+corner, recalibrate all four. The restore command is `{action:'restore',
+corner:<name>, at_corner:true}` (`corner` defaults to `top_left`; the legacy
+`at_top_left` flag still works).
 
 The service never restores position, homes or resumes motion automatically.
 A same-boot network reconnect may retain a known reference; resuming a paused
@@ -116,7 +125,7 @@ job restart is needed. Stepper override is 10–100% of the prepared drawing fee
 100% restores that feed, while lower values slow the same trajectory. To choose
 a higher base speed before drawing, change the artwork's drawing feed and
 prepare it again. The override never exceeds the planned speed, acceleration
-profile or the temporary manual-reference cap. It also scales calibration jogs;
+profile. It also scales calibration jogs;
 switch homing retains its commissioned fixed speed.
 
 Pen speed is 5–120°/s; acceleration remains limited to reduce gondola sway.

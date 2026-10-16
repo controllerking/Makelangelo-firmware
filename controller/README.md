@@ -117,8 +117,7 @@ requests to 768×768 pixels with exact validated byte counts. SVG remains limite
 to 2 MB. Over-complex outlines and blank images return actionable errors.
 
 **Connect and verify the servo before plotting images**: hatching/contours need
-many pen lifts. The temporary manual-reference bounds and 2 mm/s firmware cap
-still apply; importing artwork does not bypass commissioning or start motion.
+many pen lifts. Importing artwork does not bypass commissioning or start motion.
 
 SVG path M/L/H/V/C/S/Q/T/A/Z, relative commands, lines, polylines, polygons, rectangles (including rounded corners), circles, ellipses, groups/transforms, and internal use references are supported. Bézier/arc paths are flattened on the computer. Geometry is aspect-fitted and centred inside the selected paper margins.
 
