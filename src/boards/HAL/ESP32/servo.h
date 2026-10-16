@@ -1,6 +1,7 @@
 #pragma once
 #include <Arduino.h>
 #include "../../../servo_motion.h"
+#include "../../../motion_control.h"
 // ISR updates an atomic target; hardware PWM updates run in the main task.
 class Servo {
  public:
@@ -30,7 +31,7 @@ class Servo {
     else {
       const float usPerDegree=float(WALL_SERVO_MAX_US-WALL_SERVO_MIN_US)/180.0f;
       motion_.advance(pulse,float(uint32_t(now-lastUpdate_))/1000000.0f,
-                      WALL_SERVO_SPEED_DEG_S*usPerDegree,WALL_SERVO_ACCEL_DEG_S2*usPerDegree);
+                      motionServoSpeed()*usPerDegree,WALL_SERVO_ACCEL_DEG_S2*usPerDegree);
       motion_.position=constrain(motion_.position,float(WALL_SERVO_MIN_US),float(WALL_SERVO_MAX_US));
     }
     lastUpdate_=now;

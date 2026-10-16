@@ -6,9 +6,13 @@ import contextlib
 import json
 import secrets
 import time
+import math
+import base64
+import zlib
+from .plot import RECORD,MAX_BYTES
 
 class SimulatedRobot:
-    def __init__(self, token="simulation-only", delay=.04):
+    def __init__(self, token="simulation-only", delay=.04, storage=False):
         self.token, self.delay = token, delay
         self.boot, self.session = secrets.token_hex(8), ""
         self.next, self.completed = 1, 0
@@ -18,6 +22,9 @@ class SimulatedRobot:
         self.held_pen = 90
         self.pen_up,self.pen_down=90,40
         self.pen_calibrated=self.pen_tuning=False
+        self.stepper_percent,self.servo_speed=100,35
+        self.storage=storage;self.plot_meta=None;self.plot_data=bytearray();self.plot_saved=None
+        self.plot_running=False;self.plot_state="empty";self.plot_run="";self.plot_completed=0;self.plot_due=0
         self.writer = None
         self.authenticated = False
         self.drop_next_ack = False
@@ -45,10 +52,15 @@ class SimulatedRobot:
         return {"type":kind,"boot":self.boot,"session":self.session,"next":self.next,
                 "accepted":self.next-1,"completed":self.completed,"queue_free":8-len(self.queue),
                 "planner_free":15,"homed":self.homed,"fault":self.fault,"paused":self.paused,
-                "holding":self.hold,"busy":bool(self.queue or self.active_command),
-                "moving":bool(self.active_command),"homing":False,"x":self.x,"y":self.y,
+                "holding":self.hold,"busy":bool(self.queue or self.active_command or self.plot_running),
+                "moving":bool(self.active_command or (self.plot_running and not self.paused)),"homing":False,"x":self.x,"y":self.y,
                 "pen":self.pen,"pen_up":self.pen_up,"pen_down":self.pen_down,"limits":self.limits,
                 "pen_calibration_api":1,"pen_calibrated":self.pen_calibrated,"pen_tuning":self.pen_tuning,
+                "speed_control_api":1,"stepper_percent":self.stepper_percent,"stepper_percent_actual":self.stepper_percent,"servo_speed":self.servo_speed,
+                "stored_plot_api":int(self.storage),"plot_capacity":MAX_BYTES,"plot_free":1408*1024-len(self.plot_data),
+                "plot_id":(self.plot_meta or self.plot_saved or {}).get("job",""),"plot_run":self.plot_run,
+                "plot_state":self.plot_state,"plot_total":(self.plot_meta or self.plot_saved or {}).get("count",0),
+                "plot_received":len(self.plot_data),"plot_completed":self.plot_completed,
                 "calibration_api":1,"switch_homing_enabled":True,"calibrating":self.calibrating,"jog_steps":list(self.jog_steps),
                 "steps_per_mm":[80.,80.],"reference":self.reference,"calibration_id":self.calibration_id,
                 "draw_bounds":self.draw_bounds,
@@ -63,7 +75,7 @@ class SimulatedRobot:
             except (OSError, ConnectionError): pass
 
     def lose(self):
-        if self.authenticated and (self.queue or self.active_command or self.calibrating or self.pen_tuning or self.pen != self.pen_up):
+        if not self.plot_running and self.authenticated and (self.queue or self.active_command or self.calibrating or self.pen_tuning or self.pen != self.pen_up):
             self.hold = True
             self.calibrating=False
             self.pen_tuning=False
@@ -95,6 +107,20 @@ class SimulatedRobot:
                 self.last_seen = time.monotonic()
                 if kind in ("ping","status"):
                     await self.emit(self.state()); continue
+                if kind.startswith("plot_"):
+                    try:failure=self.plot_control(message)
+                    except (ValueError,KeyError,TypeError):failure="invalid_plot"
+                    if failure:await self.emit({"type":"error","request":message.get("request"),"error":failure})
+                    else:await self.emit(dict(self.state("control"),request=message.get("request"),op=kind))
+                    continue
+                if kind=="speeds":
+                    percent,speed=message.get("stepper_percent"),message.get("servo_speed")
+                    if message.get("boot")!=self.boot or self.fault or type(percent) is not int or not 10<=percent<=100 or type(speed) not in (int,float) or not math.isfinite(speed) or not 5<=speed<=120:
+                        await self.emit({"type":"error","request":message.get("request"),"error":"invalid_speed_or_fault"})
+                    else:
+                        self.stepper_percent,self.servo_speed=percent,speed
+                        await self.emit(dict(self.state("control"),request=message.get("request"),op=kind))
+                    continue
                 if kind in ("pause","resume","stop"):
                     if kind == "pause": self.hold = True; self.calibrating=False
                     if kind == "resume":
@@ -102,6 +128,7 @@ class SimulatedRobot:
                             await self.emit({"type":"error","error":"resume_not_safe"}); continue
                         self.hold = self.paused = False; self.pen = self.held_pen
                     if kind == "stop":
+                        if self.plot_running:self.plot_running=False;self.plot_state="stopped"
                         self.fault = True; self.homed = False; self.hold = self.paused = True
                         self.queue.clear(); self.active_command = None; self.pen = self.pen_up;self.pen_tuning=False
                         self.calibrating=False;self.reference="unknown";self.calibration_id=""
@@ -117,6 +144,7 @@ class SimulatedRobot:
                         await self.emit(dict(self.state("ack"),id=number,duplicate=True)); continue
                 elif number != self.next: fail = "out_of_order"
                 elif self.fault: fail = "fault"
+                elif self.plot_running or self.plot_meta:fail="stored_plot_owns_motion"
                 elif self.hold and message.get("op") not in ("cal_begin","cal_apply","cal_pen","pen_config","pen_end"): fail = "paused"
                 elif len(self.queue) >= 8: fail = "queue_full"
                 elif self.pen_tuning and message.get("op") not in ("cal_pen","pen_config","pen_end","sync","pen"):fail="pen_calibration_active"
@@ -149,6 +177,45 @@ class SimulatedRobot:
             writer.close()
             with contextlib.suppress(OSError): await writer.wait_closed()
 
+    def plot_control(self,m):
+        if not self.storage or m.get("boot")!=self.boot or self.fault:return "plot_boot_or_fault"
+        op=m["type"]
+        if op=="plot_start" and m.get("run")==self.plot_run and m.get("job")== (self.plot_saved or {}).get("job"):return None
+        if self.queue or self.active_command or self.plot_running or self.hold or self.paused or self.calibrating or self.pen_tuning:return "plot_busy"
+        if op=="plot_begin":
+            if m.get("confirm") is not True or self.reference!="user":return "plot_confirmation_or_reference_required"
+            if type(m.get("count")) is not int or not 1<=m["count"]<=MAX_BYTES//16:return "invalid_plot_metadata"
+            if self.plot_meta==m:return None
+            self.plot_meta=dict(m);self.plot_data=bytearray();self.plot_state="uploading"
+        elif op=="plot_chunk":
+            if not self.plot_meta:return "no_plot_upload"
+            part=base64.b64decode(m["data"],validate=True);offset=m["offset"]
+            if not part or len(part)>384 or len(part)%16:return "invalid_plot_chunk"
+            if offset<len(self.plot_data) and self.plot_data[offset:offset+len(part)]==part:return None
+            if offset!=len(self.plot_data) or offset+len(part)>self.plot_meta["count"]*16:return "plot_offset_mismatch"
+            self.plot_data.extend(part)
+        elif op=="plot_commit":
+            if not self.plot_meta:return None if self.plot_saved else "no_plot_upload"
+            if len(self.plot_data)!=self.plot_meta["count"]*16:return "plot_incomplete"
+            if zlib.crc32(self.plot_data)!=self.plot_meta["crc"]:return "plot_checksum_mismatch"
+            last_pen=1
+            for record in RECORD.iter_unpack(self.plot_data):
+                code,x,y,feed=record
+                if code not in (0,1,2,3) or not all(math.isfinite(v) for v in (x,y,feed)):return "invalid_plot_record"
+                if code==0 and (not .1<=feed<=30 or not self.draw_bounds[0]<=x<=self.draw_bounds[2] or not self.draw_bounds[1]<=y<=self.draw_bounds[3]):return "plot_outside_calibration"
+                if code!=0 and (x or y or feed):return "invalid_plot_record"
+                if code in (1,2):last_pen=code
+            if record[0]!=3 or last_pen!=1:return "plot_must_finish_pen_up_sync"
+            self.plot_saved=dict(self.plot_meta,data=bytes(self.plot_data));self.plot_meta=None
+            self.plot_state="ready";self.plot_run="";self.plot_completed=0
+        elif op=="plot_start":
+            s=self.plot_saved
+            if not s or m.get("confirm") is not True or m.get("job")!=s["job"]:return "plot_not_ready"
+            if not self.homed or self.calibration_id!=s["cal"] or (self.pen_up,self.pen_down)!=(s["up"],s["down"]):return "plot_reference_changed"
+            self.plot_run=m["run"];self.plot_completed=0;self.plot_running=True;self.plot_state="running";self.plot_due=time.monotonic()+self.delay
+        else:return "unknown_plot_operation"
+        return None
+
     async def tick(self):
         last_status = 0.
         while True:
@@ -162,6 +229,12 @@ class SimulatedRobot:
                 self.active_command = None
                 self.held_pen = self.pen; self.pen = self.pen_up; self.paused = True
             elif not self.hold and not self.fault:
+                if self.plot_running and now>=self.plot_due:
+                    op,x,y,feed=RECORD.unpack_from(self.plot_saved["data"],self.plot_completed*16)
+                    if op==0:self.x,self.y=x,y
+                    elif op in (1,2):self.pen=self.pen_up if op==1 else self.pen_down
+                    self.plot_completed+=1;self.plot_due=now+self.delay
+                    if self.plot_completed==self.plot_saved["count"]:self.plot_running=False;self.plot_state="completed"
                 if self.active_command and now >= self.busy_until:
                     command = self.active_command
                     if command["op"] == "move": self.x,self.y = command["x"],command["y"]
@@ -192,6 +265,9 @@ class SimulatedRobot:
             await asyncio.sleep(.005)
 
     def reboot(self):
+        self.plot_running=False;self.plot_meta=None;self.plot_run="";self.plot_completed=0
+        self.plot_state="ready" if self.plot_saved else "empty"
+        self.stepper_percent,self.servo_speed=100,35
         self.lose(); self.boot = secrets.token_hex(8); self.session = ""
         self.next, self.completed = 1, 0
         self.receipts.clear(); self.queue.clear(); self.active_command = None

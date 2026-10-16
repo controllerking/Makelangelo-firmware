@@ -6,6 +6,7 @@
 #include "polargraph_math.h"
 #include "user_calibration_math.h"
 #include <Preferences.h>
+#include "motion_control.h"
 
 static int penUpAngle=PEN_UP_ANGLE, penDownAngle=PEN_DOWN_ANGLE;
 static bool penCalibrated=false, penTuning=false;
@@ -95,7 +96,7 @@ bool wallCalibrationJog(int axis, int steps) {
     // Ramp from 2 to 20 mm/s at 40 mm/s^2, slowing again before the end.
     const float rampDistance=float(_MIN(i,abs(steps)-1-i))/motor_spu[axis];
     const float speed=_MIN(20.0f,sqrtf(4.0f+80.0f*rampDistance));
-    const uint32_t interval=uint32_t(ceilf(1000000.0f / _MIN(2000.0f,speed*motor_spu[axis])));
+    const uint32_t interval=motionScaledInterval(uint32_t(ceilf(1000000.0f / _MIN(2000.0f,speed*motor_spu[axis]))),motionStepperPermille());
     const uint32_t start=micros();
     do {
       wallService();
@@ -187,6 +188,7 @@ void wallEmergencyStop() {
 }
 
 void wallService() {
+  motionUpdateSpeeds(millis());
   if (wallHardwareReady()) servos[0].update();
   // Feed serial even while the planner waits or homing is in progress.
   parser.update();

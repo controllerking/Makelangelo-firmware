@@ -1,5 +1,15 @@
 # Manual four-corner homing and paper calibration
 
+Open **Calibration** in the header for pen setup, paper-corner capture and
+position recovery. **Prepare** contains artwork import, conversion settings,
+toolpath preview and the explicit upload/start confirmation. **Print & monitor**
+contains upload/drawing progress, job queue, robot controls and live speeds.
+After the final calibration step is saved (or saved position is restored), the
+app opens Prepare automatically. Starting a job opens monitoring immediately.
+Preparing another image does not change the active job. You can switch
+pages without discarding drafts or sending any motion commands; starting a job
+still requires a valid physical reference and explicit review.
+
 This workflow needs no limit switches. The computer stores the four captured
 corners and derived paper/belt reference in the ignored, owner-only file
 `controller/data/paper_calibration.json`. It survives service restarts and
@@ -97,6 +107,28 @@ A same-boot network reconnect may retain a known reference; resuming a paused
 job remains explicit. A device reboot interrupts the old job; restore/re-home
 and restart explicitly. Changed motor scale requires full recalibration, and
 prepared jobs tied to an older calibration must be prepared again.
+
+## Live speed controls
+
+The **Live speeds** card works before and during drawing, including while a job
+is paused. Choose values and click **Apply speeds**; no artwork conversion or
+job restart is needed. Stepper override is 10–100% of the prepared drawing feed:
+100% restores that feed, while lower values slow the same trajectory. To choose
+a higher base speed before drawing, change the artwork's drawing feed and
+prepare it again. The override never exceeds the planned speed, acceleration
+profile or the temporary manual-reference cap. It also scales calibration jogs;
+switch homing retains its commissioned fixed speed.
+
+Pen speed is 5–120°/s; acceleration remains limited to reduce gondola sway.
+Drawing waits for the pen to arrive and settle even at the slowest setting.
+Stepper changes ramp over at most about a second and take effect on already
+buffered motion. Speed messages are authenticated, boot-bound, out-of-band
+controls; they do not consume drawing command IDs, move the robot by themselves,
+clear a pause, or restart a job. Stop remains independent and responsive.
+
+These live values reset to 100% / 35°/s after board restart. Saved pen endpoints
+and paper corners are unaffected. Estimated drawing time is still based on the
+prepared feed, not subsequent live overrides.
 
 ## Protocol and implementation
 

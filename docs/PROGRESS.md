@@ -1,5 +1,75 @@
 # Development Progress Log
 
+## 2026-10-14 — slicer-style Prepare and Print/monitor separation
+
+- Split preparation from monitoring into separate header routes, alongside
+  Calibration. Prepare owns image settings, toolpath preview and reviewed start;
+  Print & monitor owns job history/status, upload progress and live controls.
+- Starting opens monitoring immediately while the full file uploads. Preparing
+  another image preserves the active monitored job and navigating back preserves
+  the preparation draft. Queue selection monitors metadata without replacing
+  artwork; an explicit Review action opens queued/completed jobs in Prepare.
+- Added global Stop across all pages and retained calibration handoff into
+  Prepare. Existing #workspace bookmarks remain supported as a Prepare alias.
+- Web regression checks cover independent preparation during an active draw,
+  correct monitor selection, reviewed start/upload handoff and safe navigation.
+  Browser visual QA remains unavailable (no connected browser surfaces). Static
+  UI files are served live; no backend restart, flash or motor command needed.
+
+## 2026-10-14 — separate calibration and drawing pages
+
+- Added hash-routed Calibration and Drawing workspace pages with persistent
+  header navigation. Calibration forms move intact into their own page; artwork,
+  preview, job controls, queue and live speeds stay in the workspace.
+- Initial connected setup opens calibration if pen/paper/reference setup is
+  incomplete; active/ready robots open the workspace. Explicit navigation is
+  respected. Finishing the last setup step or restoring position hands off to
+  the workspace; changing pages alone sends no robot commands or loses drafts.
+- Added calibration-page emergency Stop, readiness/continue state, responsive
+  navigation and hidden-canvas handling. No controller restart or flash needed.
+- Web regression tests cover separation, safe hash/back navigation, active-job
+  controls and complete/incomplete calibration handoff. Visual browser preview
+  unavailable: no browser surfaces are enabled in this session.
+
+## 2026-10-14 — upload complete plots for independent execution
+
+- Verified existing 4 MiB layout: SPIFFS partition 1,408 KiB; the user's
+  13,234-command drawing needs 211,744 bytes in the compact 16-byte format.
+- Added authenticated chunked upload, offset/retry handling, CRC32 and complete
+  record/geometry validation, temporary-file publication and explicit idempotent
+  start. Per-plot cap 1 MiB with available-space/headroom checks.
+- Device reads stored records into the existing planner/servo executor. Wi-Fi
+  loss does not hold a running stored plot; streaming still holds. Explicit
+  pause/resume/Stop and safety faults remain effective. Reboot keeps the file,
+  never physical position or an automatically resumed run.
+- Controller uploads fully before start and reconciles progress after reconnect
+  without streaming more commands. Network sends now buffer partial writes and
+  tolerate brief congestion; telemetry is coalesced before reliable replies.
+- Firmware build and 18 focused stored-plot/speed/pen/paper tests passed, plus
+  two streaming retry/reconnect regressions and sanitized binary-format/CRC
+  tests. With explicit approval, flashed over USB at 115200 baud; hash verified.
+- Controller restarted with the same private link. Live status confirms stored
+  plot and speed APIs, 1 MiB plot cap, saved corners and 170°/60° pen endpoints;
+  no fault or motion, physical position unknown after reset. Filesystem is not
+  initialized yet (free=0); the first confirmed upload will initialize storage.
+  Supervised physical upload/offline execution still needs commissioning after
+  restoring the saved top-left reference. No automatic test drawing was sent.
+
+## 2026-10-14 — live pen and stepper speed controls
+
+- Added local Live speeds card, enabled before/during/paused drawings: stepper
+  override 10–100% of prepared feed and servo speed 5–120°/s. Apply preserves
+  geometry, review state, pen endpoints and drawing command IDs.
+- Authenticated boot-bound out-of-band speed messages bypass the drawing FIFO.
+  Timer intervals scale buffered/in-flight motion without exceeding the original
+  profile; stepper override ramps at 100 percentage points/s. Calibration jogs
+  share the override. Servo acceleration and arrival/settle waits remain active.
+- Defaults reset on device boot; runtime settings do not write NVS. Longer
+  supervised calibration deadlines accommodate minimum speed selections.
+- Firmware compile, 13 focused speed/pen/paper tests and sanitized interval
+  scaling tests passed. Local UI regression includes controls during a draw.
+  Firmware deployment awaits user readiness; no automatic motion was sent.
+
 ## 2026-10-14 — coarse and direct pen adjustment
 
 - Added ±10°/±30° alongside fine ±1°/±5° controls, plus direct whole-degree

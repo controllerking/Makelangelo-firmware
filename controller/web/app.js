@@ -3,7 +3,51 @@ const $ = id => document.getElementById(id);
 let snapshot = {connected:false,device:{},jobs:[]}, selected = null, artwork = null, source = null;
 let toastTimer, statusBusy = false, preparing = false, revision = 0;
 let calibrationBusy=false, appliedCalibration=null, appliedPen=null, displayedPenAngle=null;
+let speedBusy=false,speedDirty=false,speedBoot=null;
 const cornerNames=['top_left','top_right','bottom_right','bottom_left'];
+let currentPage=null,initialPageChosen=false;
+let monitoredJobId=null,startBusy=false;
+// Move the existing form intact: no duplicate controls or draft reset.
+$('calibration-content').append($('calibration-card'));
+$('monitor-controls').append($('robot-card'),$('speeds-card'));
+function calibrationComplete(){
+  const d=snapshot.device;
+  return !!(snapshot.connected && snapshot.calibration && d.homed && d.calibration_id===snapshot.calibration.id && d.pen_calibrated && !snapshot.calibration_draft && !snapshot.pen_draft && !d.fault);
+}
+function renderRoute(){
+  const hash=window.location?.hash;
+  const page=hash==='#calibration'?'calibration':hash==='#monitor'?'monitor':['#prepare','#workspace'].includes(hash)?'prepare':currentPage||'prepare';
+  const changed=page!==currentPage;currentPage=page;
+  $('calibration-page').hidden=page!=='calibration';$('workspace-page').hidden=page!=='prepare';$('monitor-page').hidden=page!=='monitor';
+  for(const name of ['prepare','monitor','calibration'])$('nav-'+name).setAttribute?.('aria-current',name===page?'page':'false');
+  document.title=page==='calibration'?'Calibration · Drawy':page==='monitor'?'Print & monitor · Drawy':'Prepare · Drawy';
+  if(changed && page==='prepare')draw();
+}
+function navigate(page){
+  if(page==='workspace')page='prepare'; // Preserve existing calibration handoff and old bookmarks.
+  currentPage=page;
+  if(window.location)window.location.hash='#'+page;
+  renderRoute();window.scrollTo?.({top:0,behavior:'instant'});
+  if(page==='calibration')$('calibration-heading').focus?.({preventScroll:true});
+  else if(page==='monitor')$('monitor-heading').focus?.({preventScroll:true});
+  else {draw();$('workspace-heading').focus?.({preventScroll:true});}
+}
+function renderSetupNavigation(){
+  const ready=calibrationComplete(),d=snapshot.device;
+  if(!initialPageChosen && snapshot.connected){
+    initialPageChosen=true;
+    if(!window.location?.hash)navigate(snapshot.active?'monitor':ready?'prepare':'calibration');
+  }
+  const message=!snapshot.connected?'Robot offline':snapshot.active?'Drawing in progress':d.fault?'Reset required':snapshot.pen_draft?'Pen calibration in progress':snapshot.calibration_draft?'Paper calibration in progress':!d.pen_calibrated?'Set your pen-in and pen-out positions':!snapshot.calibration?'Capture the four paper corners':!d.homed || d.calibration_id!==snapshot.calibration.id?'Restore the saved top-left position':'Ready to draw';
+  $('workspace-readiness').textContent=$('calibration-readiness').textContent=message;
+  $('workspace-calibration-notice').hidden=ready;
+  $('workspace-setup-help').textContent=snapshot.active?'The active job is in Print & monitor. You can prepare another image without changing it.':'Prepare artwork here, then finish calibration or restore position before starting the robot.';
+  $('calibration-next-help').textContent=ready?'Saved calibration is ready. Continue to Prepare to convert and review your artwork.':message+'. No automatic movement will be performed.';
+  $('calibration-continue').disabled=!ready;
+  $('calibration-stop').disabled=!snapshot.connected || !!d.fault;
+  renderRoute();
+}
+window.addEventListener?.('hashchange',renderRoute);
 async function api(path, body) {
   const response = await fetch('/api/'+path, body === undefined ? {} : {
     method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -43,27 +87,39 @@ function render() {
   }
   renderCalibration();
   renderPenCalibration();
+  renderSpeeds();
+  renderSetupNavigation();
   for (const id of ['home','pen-up','pen-down']) $(id).disabled=!connected || !!active || !!d.fault || !!d.paused;
   $('pen-down').disabled ||= !d.homed;
   for(const id of ['home','pen-up','pen-down'])$(id).disabled ||= !!snapshot.pen_draft;
   $('home').disabled ||= !d.switch_homing_enabled || !!snapshot.calibration || !!snapshot.calibration_draft;
-  $('start').disabled=!connected || !d.homed || !!d.fault || !!active || !selected || !$('reviewed').checked || !!d.paused || !!snapshot.calibration_draft || !!snapshot.pen_draft || !!d.pen_tuning;
+  $('start').disabled=startBusy || preparing || !connected || !d.homed || !!d.fault || !!active || !selected || !$('reviewed').checked || !!d.paused || !!snapshot.calibration_draft || !!snapshot.pen_draft || !!d.pen_tuning;
+  $('start').textContent=startBusy?'Uploading…':'Upload & start drawing';
   $('pause').disabled=!connected || !active || active.state!=='running';
   $('resume').disabled=!connected || (active ? active.state!=='paused' : !!d.busy) || !d.paused || !!d.moving || !!d.fault || !d.homed;
   $('resume').textContent=active?'Resume':'Resume robot';
   $('stop').disabled=!connected || !!d.fault;
-  $('job-message').textContent=active?active.message:d.fault?'Reset the robot, then rehome.':selected?'Your drawing is ready for review.':'Ready when you are.';
-  const progress=active?100*active.completed/active.command_count:0;
+  $('header-stop').disabled=$('stop').disabled;
+  const monitored=active || snapshot.jobs.find(j=>j.id===monitoredJobId) || snapshot.jobs[0];
+  if(monitored)monitoredJobId=monitored.id;
+  $('monitor-job-title').textContent=monitored?.title||'No active drawing';
+  $('monitor-job-state').textContent=monitored?.state?.toUpperCase()||'NO JOB SELECTED';
+  $('monitor-job-details').textContent=monitored?monitored.paper+' · '+monitored.command_count.toLocaleString()+' commands · prepared estimate '+duration(monitored.estimated_seconds):'Prepare an image or select a job from the queue.';
+  $('monitor-review').disabled=!monitored || !!active || startBusy;
+  $('job-message').textContent=d.fault?'Reset the robot, then restore position.':monitored?.message||'No drawing running. Prepare artwork to get started.';
+  const uploading=monitored?.state==='uploading',done=monitored?(uploading?monitored.accepted:monitored.completed)||0:0;
+  const progress=monitored?100*done/monitored.command_count:0;
   $('progress').value=progress;
-  $('progress-label').textContent=active?Math.floor(progress)+'% complete · '+active.completed+' / '+active.command_count+' commands':'No active drawing';
+  const phase=uploading?'Uploading':monitored?.state==='completed'?'Completed':monitored?.state==='paused'?'Paused':monitored?.state==='queued'?'Not started':'Drawing';
+  $('progress-label').textContent=monitored?phase+': '+Math.floor(progress)+'% · '+done+' / '+monitored.command_count+' commands':'No active drawing';
   const queue=$('queue'); queue.replaceChildren();
   if (!snapshot.jobs.length) {const p=document.createElement('p');p.className='help';p.textContent='Your prepared drawings will appear here.';queue.append(p);}
   for (const job of snapshot.jobs) {
-    const button=document.createElement('button');button.className='queue-item'+(job.id===selected?' selected':'');
+    const button=document.createElement('button');button.className='queue-item'+(job.id===monitoredJobId?' selected':'');
     const title=document.createElement('strong');title.textContent=job.title;
     const meta=document.createElement('small');meta.textContent=job.paper+' · '+job.command_count.toLocaleString()+' commands · ~'+duration(job.estimated_seconds);
     const state=document.createElement('span');state.className='state';state.textContent=job.state;
-    button.append(title,meta,state);button.onclick=()=>act(async()=>{artwork=await api('jobs/'+job.id);selected=job.id;$('reviewed').checked=false;showArtwork();render();});
+    button.append(title,meta,state);button.onclick=()=>{monitoredJobId=job.id;navigate('monitor');render();};
     queue.append(button);
   }
 }
@@ -101,9 +157,21 @@ function renderCalibration() {
 async function calibrate(body){
   if(calibrationBusy)return;
   calibrationBusy=true;render();
-  try { snapshot=await api('calibration',body);$('cal-at-reference').checked=false;render(); }
+  try { snapshot=await api('calibration',body);$('cal-at-reference').checked=false;render();if(['finish','restore'].includes(body.action) && calibrationComplete())navigate('workspace'); }
   catch(e){toast(e.message);}
   finally{calibrationBusy=false;await refresh();}
+}
+function renderSpeeds(){
+  const d=snapshot.device,ready=snapshot.connected && d.speed_control_api===1 && !d.fault;
+  if(ready && (speedBoot!==d.boot || (!speedDirty && !speedBusy))){
+    $('stepper-speed').value=d.stepper_percent;$('servo-speed').value=d.servo_speed;
+    speedBoot=d.boot;
+  }
+  $('stepper-speed-value').textContent=$('stepper-speed').value+'%';
+  $('servo-speed-value').textContent=$('servo-speed').value+'°/s';
+  for(const id of ['stepper-speed','servo-speed','speeds-apply'])$(id).disabled=!ready || speedBusy;
+  $('speeds-status').textContent=!ready?'Updated firmware and an online, fault-free robot are required.':
+    'Applied: steppers '+Number(d.stepper_percent_actual??d.stepper_percent).toFixed(0)+'% → '+d.stepper_percent+'% · pen '+d.servo_speed+'°/s'+(speedDirty?' · unapplied changes':'');
 }
 function renderPenCalibration(){
   const d=snapshot.device,draft=snapshot.pen_draft;
@@ -130,7 +198,7 @@ function renderPenCalibration(){
 async function calibratePen(body){
   if(calibrationBusy)return;
   calibrationBusy=true;render();
-  try{snapshot=await api('pen-calibration',body);render();}
+  try{snapshot=await api('pen-calibration',body);render();if(body.action==='save' && calibrationComplete())navigate('workspace');}
   catch(e){toast(e.message);}
   finally{calibrationBusy=false;await refresh();}
 }
@@ -172,7 +240,9 @@ async function prepare() {
     const payload=input.file?{image:await imagePayload(input.file,settings.quality),name:input.file.name}:input;
     const result=await api('import',{...payload,options:settings});
     if(current!==revision){toast('Settings changed during conversion. Convert again for an updated preview.');return;}
-    artwork=result; selected=artwork.id; $('reviewed').checked=false;showArtwork();
+    artwork=result; selected=artwork.id;
+    if(!snapshot.jobs.some(j=>j.id===result.id))snapshot.jobs.unshift(result);
+    $('reviewed').checked=false;showArtwork();
   } finally { preparing=false;render(); }
 }
 function showArtwork() {
@@ -187,6 +257,7 @@ function showArtwork() {
 }
 function draw() {
   const canvas=$('preview'), box=canvas.getBoundingClientRect(), dpr=window.devicePixelRatio||1;
+  if(box.width<=0 || box.height<=0)return;
   canvas.width=Math.round(box.width*dpr);canvas.height=Math.round(box.height*dpr);
   const ctx=canvas.getContext('2d');ctx.scale(dpr,dpr);
   const rect=artwork?.paper_rect||[0,0,457.2,609.6];
@@ -238,6 +309,14 @@ for(const [id,action,role] of [['pen-capture-in','capture','up'],['pen-capture-o
   $(id).onclick=()=>calibratePen({action,role});
 $('pen-cal-save').onclick=()=>calibratePen({action:'save'});
 $('pen-cal-cancel').onclick=()=>calibratePen({action:'cancel'});
+for(const id of ['stepper-speed','servo-speed'])$(id).addEventListener('input',()=>{speedDirty=true;renderSpeeds();});
+$('speeds-form').onsubmit=async e=>{
+  e.preventDefault();if(speedBusy || !$('speeds-form').reportValidity())return;
+  speedBusy=true;renderSpeeds();
+  try{snapshot=await api('speeds',{stepper_percent:Number($('stepper-speed').value),servo_speed:Number($('servo-speed').value)});speedDirty=false;}
+  catch(e){toast(e.message);}
+  finally{speedBusy=false;await refresh();}
+};
 $('svg-file').onchange=()=>act(async()=>{
   const file=$('svg-file').files[0];if (!file)return;
   source=null;invalidate();$('image-settings').hidden=true;
@@ -263,9 +342,23 @@ $('quality').onchange=()=>{
   invalidate();
 };
 $('reviewed').onchange=render;
-$('start').onclick=()=>act(()=>api('start',{id:selected,reviewed:$('reviewed').checked}));
+$('start').onclick=async()=>{
+  if(startBusy || $('start').disabled)return;
+  const id=selected,reviewed=$('reviewed').checked;
+  startBusy=true;monitoredJobId=id;navigate('monitor');render();
+  try{await api('start',{id,reviewed});}
+  catch(e){toast(e.message);}
+  finally{startBusy=false;await refresh();}
+};
+$('monitor-review').onclick=()=>act(async()=>{
+  const job=snapshot.jobs.find(j=>j.id===monitoredJobId);
+  if(!job || snapshot.active)return;
+  artwork=await api('jobs/'+job.id);selected=job.id;$('reviewed').checked=false;showArtwork();navigate('prepare');render();
+});
 $('pause').onclick=()=>act(()=>api('pause',{}));
 $('resume').onclick=()=>act(()=>api('resume',{}));
-$('stop').onclick=()=>act(async()=>{await api('stop',{});toast('Stopped. Reset the robot and rehome before drawing again.');});
+$('stop').onclick=$('calibration-stop').onclick=$('header-stop').onclick=()=>act(async()=>{await api('stop',{});toast('Stopped. Reset the robot and rehome before drawing again.');});
+$('calibration-continue').onclick=()=>{if(calibrationComplete())navigate('workspace');};
+renderRoute();
 new ResizeObserver(draw).observe($('preview'));
 refresh();setInterval(refresh,700);draw();

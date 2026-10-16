@@ -18,6 +18,7 @@ class DeviceLink:
         self.connected = False
         self.send_lock = asyncio.Lock()
         self.command_lock = asyncio.Lock()
+        self.quiet_until=0
 
     async def connect(self, host, token, port=9999):
         await self.close()
@@ -56,14 +57,17 @@ class DeviceLink:
     async def _read(self):
         try:
             while True:
-                raw = await asyncio.wait_for(self.reader.readline(), 5)
+                try:raw = await asyncio.wait_for(self.reader.readline(), 5)
+                except asyncio.TimeoutError:
+                    if asyncio.get_running_loop().time()<self.quiet_until:continue
+                    raise
                 if not raw: raise ConnectionError("Device connection closed")
                 message = json.loads(raw)
                 if message.get("boot", self.state.get("boot")) != self.state.get("boot"):
                     raise ConnectionError("Device rebooted")
                 if message.get("type") in ("status", "ack", "control"):
                     self.state.update(message)
-                key = message.get("request") if message.get("type") == "control" else message.get("id")
+                key = message.get("request") or message.get("id")
                 future = self.pending.get(key)
                 if future and not future.done(): future.set_result(message)
                 elif message.get("type") == "error":
@@ -113,14 +117,16 @@ class DeviceLink:
             self._lost("No acknowledgement; reconnect to reconcile command IDs")
             raise ConnectionError("No acknowledgement; reconnect to reconcile command IDs")
 
-    async def control(self, operation):
+    async def control(self, operation, timeout=3, **values):
         if not self.connected: raise ConnectionError("Device disconnected")
         request = str(uuid.uuid4())
         future = asyncio.get_running_loop().create_future()
         self.pending[request] = future
+        if operation in ("plot_begin","plot_commit","plot_start"):
+            self.quiet_until=max(self.quiet_until,asyncio.get_running_loop().time()+timeout)
         try:
-            await self._write({"type":operation, "boot":self.state["boot"], "request":request})
-            reply = await asyncio.wait_for(future, 3)
+            await self._write(dict(values,type=operation,boot=self.state["boot"],request=request))
+            reply = await asyncio.wait_for(future, timeout)
             if reply.get("type") == "error": raise DeviceError(reply.get("error"))
             return reply
         finally:

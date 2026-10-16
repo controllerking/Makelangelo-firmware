@@ -2,9 +2,17 @@
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Drawy · Drawing studio</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
 <body>
-<header><a class="brand" href="/">drawy<span>drawing studio</span></a><div id="connection-badge" class="badge">Not connected</div></header>
+<header><a class="brand" href="#prepare">drawy<span>drawing studio</span></a><nav class="page-nav" aria-label="Main navigation"><a id="nav-prepare" href="#prepare">Prepare</a><a id="nav-monitor" href="#monitor">Print &amp; monitor</a><a id="nav-calibration" href="#calibration">Calibration</a></nav><div id="connection-badge" class="badge">Not connected</div><button id="header-stop" class="button danger">Stop</button></header>
 <main>
-<section class="intro"><h1>Make your next<br><em>mark.</em></h1></section>
+<section id="calibration-page" aria-labelledby="calibration-heading" hidden>
+<div class="page-heading"><p class="eyebrow">SET UP YOUR ROBOT</p><h1 id="calibration-heading" tabindex="-1">Calibrate once.<br><em>Make your mark.</em></h1><p>Set the pen positions, then capture your paper corners. Once saved and ready, you’ll move straight to Prepare.</p></div>
+<div class="calibration-safety"><div><strong id="calibration-readiness">Checking calibration…</strong><p class="help">Changing pages never moves the robot or discards a calibration draft.</p></div><button id="calibration-stop" class="button danger">Emergency stop</button></div>
+<div id="calibration-content"></div>
+<div class="calibration-next"><p id="calibration-next-help" class="help">Complete pen and paper setup to continue.</p><button id="calibration-continue" class="button primary">Continue to Prepare →</button></div>
+</section>
+<div id="workspace-page" hidden>
+<section class="intro"><p class="eyebrow">01 · PREPARE</p><h1 id="workspace-heading" tabindex="-1">Make your next<br><em>mark.</em></h1><p>Choose artwork, tune the conversion and review the toolpath. Your active drawing is tracked separately in Print &amp; monitor.</p></section>
+<div id="workspace-calibration-notice" class="setup-notice"><div><strong id="workspace-readiness">Calibration status</strong><p id="workspace-setup-help" class="help">You can prepare artwork now; establish the robot’s position before drawing.</p></div><a class="button secondary" href="#calibration">Open calibration →</a></div>
 <section class="studio">
 <div class="preview-panel">
 <div class="panel-heading"><div><p class="eyebrow">THE DRAWING BOARD</p><h2 id="drawing-title">Your next drawing</h2></div><span id="paper-label" class="subtle">18 × 24 in</span></div>
@@ -13,10 +21,19 @@
 <div id="warning-list" class="notice" hidden></div>
 </div>
 <aside>
-<section class="card"><div class="panel-heading"><h2>Your robot</h2><span id="machine-state" class="subtle">Offline</span></div>
+<section class="card" id="robot-card"><div class="panel-heading"><h2>Your robot</h2><span id="machine-state" class="subtle">Offline</span></div>
 <p id="connection-message" class="help" role="status">Connecting automatically</p>
 <div class="machine-readout"><div><small>Position</small><span id="position">—</span></div><div><small>Pen</small><span id="pen-state">—</span></div></div>
 <div class="button-row"><button id="home" class="button secondary">Switch home (later)</button><button id="pen-up" class="button secondary">Pen up</button><button id="pen-down" class="button secondary">Pen down</button></div>
+</section>
+<section class="card" id="speeds-card"><h2>Live speeds</h2>
+<form id="speeds-form">
+<label>Stepper motors · drawing speed override<input id="stepper-speed" type="range" min="10" max="100" step="1" value="100"><output id="stepper-speed-value">100%</output></label>
+<label>Pen servo · degrees per second<input id="servo-speed" type="range" min="5" max="120" step="1" value="35"><output id="servo-speed-value">35°/s</output></label>
+<button id="speeds-apply" class="button secondary wide">Apply speeds</button>
+</form>
+<p id="speeds-status" class="help" role="status">Connect the updated firmware to adjust live speeds.</p>
+<p class="help">Apply before or during a drawing—no restart needed. 100% uses the drawing speed selected when preparing artwork; lower values slow it down, including calibration jogs. Pen motion keeps gentle acceleration. Speed changes do not change drawing detail. Defaults reset on board restart.</p>
 </section>
 <section class="card" id="calibration-card"><h2>Pen &amp; paper calibration</h2>
 <h3>Pen positions</h3>
@@ -63,8 +80,13 @@
 </form></section>
 </aside>
 </section>
-<section class="control-strip"><div><p class="eyebrow">AT YOUR PACE</p><h2 id="job-message">Ready when you are.</h2><progress id="progress" value="0" max="100"></progress><small id="progress-label">No active drawing</small></div><div class="job-controls"><label class="review"><input id="reviewed" type="checkbox"> I checked paper placement, carriage clearance and that the pen lift works.</label><div class="button-row"><button id="start" class="button primary">Start drawing</button><button id="pause" class="button secondary">Pause</button><button id="resume" class="button secondary">Resume</button><button id="stop" class="button danger">Stop</button></div><small>Pause drains buffered movement and lifts the pen. Stop requires a robot reset.</small></div></section>
+<section class="control-strip"><div><p class="eyebrow">REVIEW &amp; SEND</p><h2>Ready for the robot?</h2><p class="help">Conversion only prepares a job. Uploading and starting always require your confirmation.</p></div><div class="job-controls"><label class="review"><input id="reviewed" type="checkbox"> I checked paper placement, carriage clearance and that the pen lift works.</label><div class="button-row"><button id="start" class="button primary">Upload &amp; start drawing</button><a class="button secondary" href="#monitor">View job status →</a></div></div></section>
+</div>
+<section id="monitor-page" hidden aria-labelledby="monitor-heading">
+<div class="page-heading"><p class="eyebrow">02 · PRINT &amp; MONITOR</p><h1 id="monitor-heading" tabindex="-1">Your robot.<br><em>At work.</em></h1><p>Track uploads and drawings, adjust live speeds and control the machine. Preparing the next image won’t change the active job.</p></div>
+<div class="monitor-layout"><section class="card monitor-job"><p class="eyebrow" id="monitor-job-state">NO JOB SELECTED</p><h2 id="monitor-job-title">No active drawing</h2><p id="monitor-job-details" class="help">Prepare an image or select a job from the queue.</p><h3 id="job-message">Ready when you are.</h3><progress id="progress" value="0" max="100"></progress><p id="progress-label" class="help" role="status">No active drawing</p><div class="button-row"><button id="pause" class="button secondary">Pause</button><button id="resume" class="button secondary">Resume</button><button id="stop" class="button danger">Stop</button></div><p class="help">Pause drains buffered movement and lifts the pen. Stop requires a robot reset. Remote controls require a connection, even when a stored plot runs independently.</p><div class="button-row"><a class="button secondary" href="#prepare">Prepare another drawing →</a><button id="monitor-review" class="button secondary">Review selected job in Prepare</button></div></section><div id="monitor-controls"></div></div>
 <section class="queue-section"><div class="panel-heading"><h2>The drawing queue</h2><span class="subtle">Prepared here, drawn on your wall.</span></div><div id="queue" class="queue"><p class="help">Your prepared drawings will appear here.</p></div></section>
+</section>
 <div id="toast" role="status" aria-live="polite" hidden></div>
 <footer>drawy · your computer makes the art, your robot makes the marks.</footer>
 </main></body></html>

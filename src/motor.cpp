@@ -7,6 +7,7 @@
 #include "configure.h"
 #ifdef TARGET_ESP32
 #include "wall_polargraph.h"
+#include "motion_control.h"
 #endif
 
 //------------------------------------------------------------------------------
@@ -1330,7 +1331,7 @@ void Stepper::isr() {
   // after the work for the next pulse. Do not toggle global FreeRTOS IRQs.
   portENTER_CRITICAL_ISR(&stepperMux);
   isrPulsePhase();
-  const hal_timer_t interval = isrBlockPhase();
+  const hal_timer_t interval = motionScaledInterval(isrBlockPhase(),motionStepperPermille());
   HAL_timer_set_compare(0, _MAX(interval, HAL_timer_get_count(0) + 20));
   portEXIT_CRITICAL_ISR(&stepperMux);
 #else

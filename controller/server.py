@@ -11,6 +11,8 @@ import secrets
 import time
 from urllib.parse import parse_qs, urlsplit
 import uuid
+import base64
+from .plot import encode_plot
 
 from .artwork import PAPER, demo_paths, prepare, svg_paths, finite
 from .transport import DeviceLink, DeviceError
@@ -52,10 +54,12 @@ class Controller:
                 journal = path.with_suffix(".state.json")
                 if journal.exists(): job.update(json.loads(journal.read_text()))
                 if job["state"] == "running": job["state"] = "paused"
+                if job.get("execution")=="stored" and job["state"]=="uploading":job["state"]="uncertain"
                 self.jobs[job["id"]] = job
-        self.active = next((j["id"] for j in self.jobs.values() if j["state"] == "paused"), None)
+        self.active = next((j["id"] for j in self.jobs.values() if j["state"] in ("paused","uncertain")), None)
         self.worker = None
         self.operation_lock = asyncio.Lock()
+        self.speed_lock = asyncio.Lock()
         self.preparation_lock = asyncio.Lock()
         self.simulation = False
         path=self.data_dir/"paper_calibration.json"
@@ -79,6 +83,10 @@ class Controller:
         if self.active and self.active in self.jobs:
             job = self.jobs[self.active]
             if job["state"] == "running":
+                if job.get("execution")=="stored":
+                    job["message"]="Controller offline; verified plot continues on the device"
+                    self.persist(job)
+                    return
                 job["state"] = "paused"; job["message"] = reason
                 self.persist(job)
 
@@ -91,7 +99,9 @@ class Controller:
         state = self.link.state
         if self.active and self.active in self.jobs:
             job = self.jobs[self.active]
-            if job.get("base_id") and job.get("boot") == state.get("boot"):
+            if job.get("execution")=="stored" and self.link.connected:
+                self.reconcile_stored(job)
+            if job.get("execution")!="stored" and job.get("base_id") and job.get("boot") == state.get("boot"):
                 job["completed"] = max(job.get("completed",0),
                     min(job["command_count"], max(0, state.get("completed",0)-job["base_id"]+1)))
         return {"connected":self.link.connected, "device":dict(state),
@@ -139,7 +149,7 @@ class Controller:
             if self.active or d.get("fault") or d.get("busy") or d.get("moving"):
                 raise ValueError("Calibration requires an idle robot with no active job or fault")
             action=data.get("action")
-            async def send(command, timeout=15):
+            async def send(command, timeout=40):
                 reply=await self.link.command(command)
                 await self.link.wait_completed(reply["id"],timeout=timeout)
                 if self.link.state.get("error"): raise DeviceError(self.link.state["error"])
@@ -175,7 +185,7 @@ class Controller:
                     steps=round(mm*draft["spu"][axis])
                     if not 1<=abs(steps)<=4000: raise ValueError("Jog must be 1–4000 pulses")
                     await send({"op":"cal_jog","axis":axis,"steps":steps},
-                               timeout=max(15,abs(steps)/2000+abs(mm)/10+5))
+                               timeout=max(15,10*(abs(steps)/2000+abs(mm)/10)+5))
                     if not self.link.state.get("calibrating"): raise DeviceError("Jog interrupted; begin calibration again")
                 elif action=="capture":
                     name=data.get("corner")
@@ -207,7 +217,7 @@ class Controller:
             action=data.get("action")
             async def send(command):
                 reply=await self.link.command(dict(command,confirm=True))
-                await self.link.wait_completed(reply["id"],timeout=15)
+                await self.link.wait_completed(reply["id"],timeout=40)
                 if self.link.state.get("error"): raise DeviceError(self.link.state["error"])
             if action=="begin":
                 if data.get("confirmed") is not True: raise ValueError("Confirm servo clearance and supervised pen adjustment")
@@ -249,6 +259,19 @@ class Controller:
                     await send({"op":"pen_end"})
                     self.pen_draft=None
                 else: raise ValueError("Unknown pen calibration action")
+            return self.snapshot()
+
+    async def set_speeds(self,data):
+        if not isinstance(data,dict): raise ValueError("Expected speed settings")
+        percent=data.get("stepper_percent")
+        servo=finite(data.get("servo_speed"),"pen speed")
+        if type(percent) is not int or not 10<=percent<=100: raise ValueError("Stepper override must be 10–100%")
+        if not 5<=servo<=120: raise ValueError("Pen speed must be 5–120 degrees/second")
+        async with self.speed_lock:
+            if not self.link.connected or self.link.state.get("speed_control_api")!=1:
+                raise ValueError("Flash the live-speed firmware first")
+            if self.link.state.get("fault"): raise ValueError("Reset the robot after a fault")
+            await self.link.control("speeds",stepper_percent=percent,servo_speed=servo)
             return self.snapshot()
 
     def build_artwork(self, data, device):
@@ -333,13 +356,66 @@ class Controller:
         self.validate_job(job)
         if self.link.state.get("holding") or self.link.state.get("paused"):
             raise ValueError("Resolve the robot's paused state before starting a new job")
+        if self.link.state.get("stored_plot_api")==1:
+            if not self.calibration:raise ValueError("Complete paper calibration before uploading a stored plot")
+            payload,crc=encode_plot(job)
+            if len(payload)>self.link.state.get("plot_capacity",0):raise ValueError("Plot exceeds device storage capacity")
+            self.active=job_id
+            job.update(state="uploading",execution="stored",accepted=0,completed=0,boot=self.link.state["boot"],
+                       plot_run=str(uuid.uuid4()),message="Uploading complete plot before any movement")
+            self.persist(job)
+            try:
+                async with self.operation_lock:
+                    reply=await self.link.control("plot_begin",job=job_id,cal=self.calibration["id"],count=len(payload)//16,
+                        crc=crc,up=self.link.state["pen_up"],down=self.link.state["pen_down"],
+                        spu0=self.calibration["spu"][0],spu1=self.calibration["spu"][1],confirm=True,timeout=30)
+                    offset=int(reply.get("plot_received",0))
+                    if not 0<=offset<=len(payload) or offset%16:raise DeviceError("Invalid device upload offset")
+                    while offset<len(payload):
+                        if job["state"]!="uploading":raise ValueError("Upload cancelled; no plot started")
+                        part=payload[offset:offset+384]
+                        await self.link.control("plot_chunk",offset=offset,data=base64.b64encode(part).decode(),timeout=15)
+                        offset+=len(part);job["accepted"]=offset//16
+                    await self.link.control("plot_commit",timeout=30)
+                    await self.link.control("plot_start",job=job_id,run=job["plot_run"],confirm=True,timeout=30)
+                job.update(state="running",message="Drawing from device storage",started=time.time())
+                self.persist(job)
+                return self.public_job(job)
+            except Exception:
+                # Start acknowledgement can be lost after the device started.
+                if job["state"]!="cancelled":job.update(state="uncertain",message="Upload/start interrupted; reconnect to verify device state—do not restart blindly")
+                self.persist(job)
+                raise
         # Match the robot's configured servo angles even after recalibration.
-        job.update(pen_up=self.link.state["pen_up"], accepted=0, completed=0,
+        job.update(execution="streamed",pen_up=self.link.state["pen_up"], accepted=0, completed=0,
                    base_id=int(self.link.state["next"]), boot=self.link.state["boot"],
                    state="running", message="Drawing", started=time.time())
         self.active = job_id; self.persist(job)
         self.worker = asyncio.create_task(self.run_job(job))
         return self.public_job(job)
+
+    def reconcile_stored(self,job):
+        if job["state"]=="uploading":return
+        d=self.link.state
+        if job.get("boot")!=d.get("boot"):
+            job.update(state="interrupted",message="Device rebooted; restore position and explicitly restart")
+            self.active=None;self.persist(job);return
+        if d.get("plot_id")!=job["id"] or d.get("plot_run")!=job.get("plot_run"):
+            if job["state"] in ("uploading","uncertain"):
+                job.update(state="interrupted",message="Stored plot did not start; review and upload again")
+                self.active=None
+                self.persist(job)
+            return
+        job["accepted"]=job["command_count"]
+        job["completed"]=d.get("plot_completed",0)
+        if d.get("fault") or d.get("plot_state") in ("fault","error","stopped"):
+            job.update(state="error",message="Device stopped; restore position before restarting");self.active=None
+        elif d.get("plot_state")=="completed":
+            job.update(state="completed",message="Drawing finished on device");self.active=None
+        elif d.get("paused") or d.get("holding"):
+            job.update(state="paused",message="Device paused; explicit resume required")
+        else:job.update(state="running",message="Drawing from device storage; computer may disconnect")
+        self.persist(job)
 
     async def run_job(self, job):
         try:
@@ -407,7 +483,7 @@ class Controller:
             raise ValueError("Wait until buffered motion stops and the pen is up")
         await self.link.control("resume")
         job.update(state="running", message="Drawing"); self.persist(job)
-        self.worker = asyncio.create_task(self.run_job(job))
+        if job.get("execution")!="stored":self.worker = asyncio.create_task(self.run_job(job))
         return self.public_job(job)
 
     async def stop(self):
@@ -522,6 +598,7 @@ class HttpServer:
         c = self.controller
         if path == "/api/calibration": return await c.calibration_action(data)
         if path == "/api/pen-calibration": return await c.pen_calibration_action(data)
+        if path == "/api/speeds": return await c.set_speeds(data)
         if path == "/api/import": return await c.import_async(data)
         if path == "/api/start": return await c.start(data["id"], data.get("reviewed",False))
         if path == "/api/pause": return await c.pause()

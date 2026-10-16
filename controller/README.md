@@ -1,6 +1,15 @@
 # Drawy computer controller
 
-This service hosts a private browser interface and streams drawing coordinates to the ESP32. Artwork preparation runs on your computer. Python 3.11+ is required; there are no third-party Python dependencies.
+This service hosts a private browser interface and prepares artwork on your
+computer. With updated ESP32 firmware it uploads and verifies the complete plot,
+then the device draws independently; the computer is only needed for monitoring
+and remote controls afterward. Older firmware uses connection-dependent
+streaming. Python 3.11+ is required; no third-party Python dependencies.
+
+Stored plots use 16 bytes/command, with a 1 MiB per-file cap and available-space
+checks. The WROOM's existing 4 MiB layout reserves 1,408 KiB for SPIFFS, so no
+partition change is required. The current 13,234-command example is 211,744 bytes
+(about 207 KiB). See [stored plot operation](../docs/STORED_PLOTS.md).
 
 ## Start
 

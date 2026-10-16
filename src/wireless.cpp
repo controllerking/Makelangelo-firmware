@@ -1,4 +1,5 @@
 #include "configure.h"
+#include "motion_control.h"
 #ifdef TARGET_ESP32
 #include "wireless.h"
 #include "wall_polargraph.h"
@@ -12,6 +13,8 @@
 #include <ArduinoJson.h>
 #include <esp_system.h>
 #include <lwip/sockets.h>
+#include "plot_store.h"
+#include <errno.h>
 
 namespace {
 constexpr unsigned queueCapacity = 8;
@@ -33,12 +36,13 @@ uint32_t settleUntil = 0, lastDispatched = 0;
 bool joining = false, scanRunning = false;
 int attemptedNetwork = -1;
 uint32_t failedUntil[3] = {0, 0, 0};
-char line[384];
+char line[1024];
 size_t lineLength = 0;
 bool overflow = false;
 WireLedger ledger;
 struct Command {
   uint32_t id;
+  uint32_t plotIndex;
   char op[12];
   float x, y, feed;
   int angle, penUp, penDown;
@@ -49,6 +53,7 @@ struct Command {
 Command queue[queueCapacity];
 unsigned head = 0, count = 0;
 String lastError;
+char tx[16384];size_t txHead=0,txSize=0;uint32_t txProgress=0;
 
 String randomHex(unsigned bytes) {
   String out;
@@ -61,18 +66,32 @@ String randomHex(unsigned bytes) {
 }
 bool idle() { return !planner.movesPlanned() && !dispatching && !wallIsHoming(); }
 void lostConnection();
+void flushTx() {
+  if(!txSize || !client.connected())return;
+  const size_t contiguous=_MIN(txSize,sizeof(tx)-txHead);
+  const int n=send(client.fd(),tx+txHead,contiguous,MSG_DONTWAIT);
+  if(n>0) {txHead=(txHead+n)%sizeof(tx);txSize-=n;txProgress=millis();}
+  else if(n<0 && errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR)lostConnection();
+  else if(uint32_t(millis()-txProgress)>2000)lostConnection();
+}
 void writeJson(JsonDocument &doc) {
   if (!client.connected()) return;
   // WiFiClient::write can wait for seconds on a non-reading peer. Never let
   // telemetry block motion service: a short/failed nonblocking write loses
   // the link and enters the same drain/pen-up path as Wi-Fi loss.
-  char outgoing[1400];
+  char outgoing[2048];
   if (doc.overflowed() || measureJson(doc) + 1 >= sizeof(outgoing)) {
     lostConnection(); return;
   }
   size_t n = serializeJson(doc, outgoing, sizeof(outgoing) - 1);
   outgoing[n++] = '\n';
-  if (send(client.fd(), outgoing, n, MSG_DONTWAIT) != int(n)) lostConnection();
+  flushTx();
+  if(!client.connected())return;
+  if(txSize>4096 && String(doc["type"]|"")=="status")return; // Coalesce telemetry, never acknowledgements.
+  if(n>sizeof(tx)-txSize) {lostConnection();return;}
+  if(!txSize)txProgress=millis();
+  for(size_t i=0;i<n;++i)tx[(txHead+txSize+i)%sizeof(tx)]=outgoing[i];
+  txSize+=n;flushTx();
 }
 void state(JsonObject out) {
   out["boot"] = bootId;
@@ -98,7 +117,7 @@ void state(JsonObject out) {
   out["fault"] = wallStopped();
   out["paused"] = paused;
   out["holding"] = hold;
-  out["busy"] = bool(count || planner.movesPlanned() || dispatching);
+  out["busy"] = bool(count || planner.movesPlanned() || dispatching || plotStore.active() || plotStore.uploading());
   out["moving"] = bool(planner.movesPlanned() || dispatching || restoring || wallIsHoming());
   out["homing"] = wallIsHoming();
   out["x"] = axies[0].pos; out["y"] = axies[1].pos;
@@ -106,6 +125,10 @@ void state(JsonObject out) {
   out["pen_up"] = wallPenUpAngle(); out["pen_down"] = wallPenDownAngle();
   out["pen_calibration_api"]=1;out["pen_calibrated"]=wallPenCalibrated();
   out["pen_tuning"]=wallPenTuning();
+  out["speed_control_api"]=1;
+  out["stepper_percent"]=motionStepperPercent();
+  out["stepper_percent_actual"]=motionStepperPermille()/10.0f;
+  out["servo_speed"]=motionServoSpeed();
   out["position_kind"] = planner.movesPlanned() ? "planned" : "settled";
   JsonArray limits = out.createNestedArray("limits");
   for (int i = 0; i < 2; ++i) {
@@ -113,9 +136,10 @@ void state(JsonObject out) {
     a.add(axies[i].limitMin); a.add(axies[i].limitMax);
   }
   out["error"] = lastError;
+  plotStore.status(out);
 }
 void status(const char *type = "status") {
-  StaticJsonDocument<2048> doc;
+  DynamicJsonDocument doc(4096);
   doc["type"] = type;
   state(doc.as<JsonObject>());
   writeJson(doc);
@@ -132,15 +156,16 @@ void requestHold() {
   if (wallIsHoming()) wallEmergencyStop();
 }
 void lostConnection() {
-  if (authenticated && (count || planner.movesPlanned() || wallCalibrationActive() || wallPenTuning() || servos[0].read() != wallPenUpAngle()))
+  if (!plotStore.active() && authenticated && (count || planner.movesPlanned() || wallCalibrationActive() || wallPenTuning() || servos[0].read() != wallPenUpAngle()))
     requestHold();
   authenticated = false;
   socketAssigned = false;
   lineLength = 0; overflow = false;
+  txHead=txSize=0;
   client.stop();
 }
 void acknowledge(uint32_t id, bool duplicate) {
-  StaticJsonDocument<2048> doc;
+  DynamicJsonDocument doc(4096);
   doc["type"] = "ack"; doc["id"] = id; doc["duplicate"] = duplicate;
   state(doc.as<JsonObject>()); writeJson(doc);
 }
@@ -151,7 +176,7 @@ bool validSession(const String &s) {
   return true;
 }
 void handleLine(const char *raw) {
-  StaticJsonDocument<512> doc;
+  StaticJsonDocument<1536> doc;
   if (deserializeJson(doc, raw)) { error("invalid_json"); return; }
   const String type = doc["type"] | "";
   if (type == "hello") {
@@ -160,7 +185,7 @@ void handleLine(const char *raw) {
       error("unauthorized"); client.stop(); return;
     }
     if (session.length() && session != candidate &&
-        (count || planner.movesPlanned() || hold || ledger.completed != ledger.next - 1)) {
+        (count || planner.movesPlanned() || hold || plotStore.active() || plotStore.uploading() || ledger.completed != ledger.next - 1)) {
       error("session_busy"); client.stop(); return;
     }
     if (session != candidate) {
@@ -171,10 +196,44 @@ void handleLine(const char *raw) {
   if (!authenticated) { error("hello_required"); client.stop(); return; }
   lastSeen = millis();
   if (type == "ping" || type == "status") { status(); return; }
+  if(type.startsWith("plot_")) {
+    DynamicJsonDocument reply(4096);
+    reply["request"]=doc["request"]|"";
+    const char *failure=nullptr;
+    if(String(doc["boot"]|"")!=bootId || wallStopped())failure="plot_boot_or_fault";
+    else if(type=="plot_start" && plotStore.active())failure=plotStore.start(doc["job"]|"",doc["run"]|"");
+    else if(count || !idle() || hold || paused || wallCalibrationActive() || wallPenTuning() || plotStore.active())failure="plot_busy";
+    else if(type=="plot_begin") {
+      if(doc["confirm"]!=true || !wallUserReference())failure="plot_confirmation_or_reference_required";
+      else failure=plotStore.upload(doc.as<JsonObjectConst>());
+    } else if(type=="plot_chunk")failure=plotStore.chunk(doc.as<JsonObjectConst>());
+    else if(type=="plot_commit")failure=plotStore.commit();
+    else if(type=="plot_start") {
+      if(doc["confirm"]!=true)failure="confirmation_required";
+      else failure=plotStore.start(doc["job"]|"",doc["run"]|"");
+    } else failure="unknown_plot_operation";
+    if(failure) {reply["type"]="error";reply["error"]=failure;}
+    else {reply["type"]="control";reply["op"]=type;state(reply.as<JsonObject>());}
+    writeJson(reply);return;
+  }
+  if (type=="speeds") {
+    // Out of band: never wait behind the drawing FIFO or consume command IDs.
+    DynamicJsonDocument reply(4096);
+    reply["request"]=doc["request"] | "";
+    if (String(doc["boot"] | "")!=bootId || wallStopped() ||
+        !doc["stepper_percent"].is<int>() || !doc["servo_speed"].is<float>() ||
+        !motionSetSpeeds(doc["stepper_percent"],doc["servo_speed"])) {
+      reply["type"]="error";reply["error"]="invalid_speed_or_fault";
+    } else {
+      reply["type"]="control";reply["op"]="speeds";state(reply.as<JsonObject>());
+    }
+    writeJson(reply);return;
+  }
   if (type == "pause" || type == "resume" || type == "stop") {
     if (type == "pause") requestHold();
     if (type == "stop") {
       wallEmergencyStop(); count = 0; penSettling = restoring = false;
+      plotStore.stop();
       hold = true; paused = true; lastError = "emergency_stop";
     }
     if (type == "resume") {
@@ -185,11 +244,12 @@ void handleLine(const char *raw) {
       restoring = true; settleUntil = millis() + 300;
       hold = false; paused = false;
     }
-    StaticJsonDocument<2048> reply;
+    DynamicJsonDocument reply(4096);
     reply["type"] = "control"; reply["request"] = doc["request"] | "";
     reply["op"] = type; state(reply.as<JsonObject>()); writeJson(reply); return;
   }
   if (type != "command") { error("unknown_type"); return; }
+  if(plotStore.active() || plotStore.uploading()) {error("stored_plot_owns_motion");return;}
   if (String(doc["boot"] | "") != bootId) { error("boot_changed"); return; }
   if (!doc["id"].is<uint32_t>()) { error("invalid_id"); return; }
   const uint32_t id = doc["id"];
@@ -394,6 +454,7 @@ void networkMaintenance() {
 }
 }
 void wirelessBegin() {
+  plotStore.begin();
   if (started) return;
   started = true;
   WiFi.persistent(false); WiFi.setHostname("drawy"); WiFi.mode(WIFI_STA); WiFi.setSleep(false);
@@ -415,11 +476,11 @@ void wirelessBegin() {
     joining = true; joinStarted = millis(); retryAt = millis() + 30000;
   } else beginSetup();
 }
-bool wirelessOwnsMotion() { return authenticated || count || hold; }
+bool wirelessOwnsMotion() { return authenticated || count || hold || plotStore.active() || plotStore.uploading(); }
 bool wirelessHoldMotion() { return hold; }
 bool wirelessSetupRequested(const char *raw) {
   if (strcmp(raw, "WIFI SETUP")) return false;
-  if (!idle() || count) { SERIAL_ECHOLNPGM("Finish/pause the job before Wi-Fi setup."); return true; }
+  if (!idle() || count || plotStore.active() || plotStore.uploading()) { SERIAL_ECHOLNPGM("Finish/stop the job before Wi-Fi setup."); return true; }
   beginSetup();
   // Also repeat details when setup was already advertising before USB opened.
   MYSERIAL1.println(setupName.c_str());
@@ -431,6 +492,7 @@ bool wirelessSetupRequested(const char *raw) {
 void wirelessPoll() {
   if (!started || polling) return;
   polling = true;
+  flushTx();
   networkMaintenance();
   if (socketAssigned && (!client.connected() ||
       (authenticated && WiFi.status() != WL_CONNECTED && client.localIP() != WiFi.softAPIP())))
@@ -453,7 +515,7 @@ void wirelessPoll() {
     if (c == '\n') {
       line[lineLength] = 0;
       if (overflow) error("line_too_long");
-      else if (lineLength) handleLine(line);
+      else if (lineLength) {handleLine(line);lastSeen=millis();} // Own flash work must not trigger a heartbeat timeout.
       lineLength = 0; overflow = false;
     } else if (lineLength < sizeof(line) - 1) line[lineLength++] = c;
     else overflow = true;
@@ -462,14 +524,17 @@ void wirelessPoll() {
   if (authenticated && uint32_t(millis() - lastStatus) > 250) {
     lastStatus = millis(); status();
   }
+  flushTx();
   polling = false;
 }
 void wirelessAdvance() {
   if (!started || dispatching) return;
   if (wallStopped()) {
+    plotStore.stop("fault");
     count = 0; hold = paused = true; penSettling = restoring = false; return;
   }
   if (!planner.movesPlanned()) ledger.finish(lastDispatched);
+  if(!planner.movesPlanned() && !penSettling)plotStore.settle();
   if (hold) {
     if (!planner.movesPlanned() && !paused) {
       heldPen = servos[0].read();
@@ -483,6 +548,16 @@ void wirelessAdvance() {
     if (servos[0].moving()) { settleUntil=millis()+300; return; }
     if (int32_t(millis() - settleUntil) < 0) return;
     restoring = false;
+  }
+  if(!count && plotStore.active()) {
+    PlotRecord record;uint32_t index;
+    if(plotStore.next(record,index)) {
+      Command cmd={};cmd.plotIndex=index;
+      if(record.op==0) {strcpy(cmd.op,"move");cmd.x=record.x;cmd.y=record.y;cmd.feed=record.feed;}
+      else if(record.op==3)strcpy(cmd.op,"sync");
+      else {strcpy(cmd.op,"pen");cmd.angle=record.op==1 ? wallPenUpAngle() : wallPenDownAngle();}
+      queue[head]=cmd;count=1;
+    }
   }
   if (!count) return;
   Command &cmd = queue[head];
@@ -538,7 +613,8 @@ void wirelessAdvance() {
     if (hold && (fabsf(axies[0].pos - cmd.x) > 0.001f || fabsf(axies[1].pos - cmd.y) > 0.001f))
       return; // Retain the unplanned remainder for explicit same-boot resume.
   }
-  lastDispatched = cmd.id;
+  if(cmd.plotIndex)plotStore.dispatched(cmd.plotIndex);
+  else lastDispatched = cmd.id;
   head = (head + 1) % queueCapacity; --count;
   if (!planner.movesPlanned()) ledger.finish(lastDispatched);
 }
