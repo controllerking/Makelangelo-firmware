@@ -7,7 +7,8 @@ import xml.etree.ElementTree as ET
 NUMBER = r"[-+]?(?:\d*\.\d+|\d+\.?\d*)(?:[eE][-+]?\d+)?"
 TOKEN = re.compile(r"[MmLlHhVvCcSsQqTtAaZz]|" + NUMBER)
 IDENTITY = (1., 0., 0., 1., 0., 0.)
-MAX_POINTS = 100_000
+MAX_POINTS = 1_500_000        # memory-bound (CT has 2 GiB), not a robot limit
+MAX_COMMANDS = 3_000_000      # long jobs upload to the robot in ~65k-command parts
 PAPER = {"Letter": (215.9, 279.4), "11 × 14": (279.4, 355.6),
          "11 × 17": (279.4, 431.8), "12 × 18": (304.8, 457.2),
          "16 × 20": (406.4, 508.0), "18 × 24": (457.2, 609.6),
@@ -193,7 +194,7 @@ def length(value, default=0):
 
 
 def svg_paths(svg, tolerance=None):
-    if len(svg.encode("utf-8")) > 2_000_000:
+    if len(svg.encode("utf-8")) > 30_000_000:
         raise ValueError("SVG limit is 2 MB")
     if re.search(r"<!\s*(DOCTYPE|ENTITY)", svg, re.I):
         raise ValueError("SVG document types/entities are not accepted")
@@ -375,7 +376,7 @@ def prepare(paths, options, pen_up=90, pen_down=40, source_bounds=None):
         previous = clean[-1]
     commands.append({"op":"sync"})
     if len(commands) == 1: raise ValueError("Artwork contains no nonzero drawing paths")
-    if len(commands) > 4*MAX_POINTS+1: raise ValueError("Job too large; simplify the SVG")
+    if len(commands) > MAX_COMMANDS: raise ValueError("Job too large; simplify the SVG")
     servo_speed=finite(options.get("servo_speed",35),"servo speed")
     if not 5<=servo_speed<=120: raise ValueError("Servo speed must be 5–120 degrees/second")
     timing = estimate(commands, pen_up, pen_down, servo_speed)

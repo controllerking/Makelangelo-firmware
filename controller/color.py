@@ -19,7 +19,7 @@ def decode_rgb(image, options):
         raise ValueError('Four-pen drawings need an RGB image; upload PNG, JPG or WebP')
     w,h=image.get('width'),image.get('height')
     if type(w) is not int or type(h) is not int or not 2<=w<=MAX_DIMENSION or not 2<=h<=MAX_DIMENSION:
-        raise ValueError('RGB image dimensions must be 2–768 pixels')
+        raise ValueError('RGB image dimensions must be 2–%d pixels' % MAX_DIMENSION)
     encoded=image.get('pixels')
     if not isinstance(encoded,str) or len(encoded)>4*((w*h*3+2)//3): raise ValueError('Invalid RGB image size')
     try: pixels=base64.b64decode(encoded,validate=True)
@@ -91,7 +91,7 @@ def prepare_color(image,options,pen_up,pen_down):
                            path_end=len(paths)+len(prepared['paths']),estimated_seconds=prepared['estimated_seconds']))
         commands.extend(prepared['commands']);paths.extend(prepared['paths'])
     if not stages: raise ValueError('No colored marks found; the image is blank or too pale')
-    if sum(map(len,paths))>4*MAX_POINTS: raise ValueError('Color job is too complex; choose Fast')
+    if sum(map(len,paths))>MAX_POINTS: raise ValueError('Color job is too complex; choose Fast')
     result=dict(first,commands=commands,paths=paths,color_stages=stages,color_mode='rgbk',
                 command_count=len(commands),path_count=len(paths),image_size=[w,h],color_dither=dither,omitted_colors=omitted)
     result['estimated_seconds']=sum(s['estimated_seconds'] for s in stages)

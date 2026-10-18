@@ -23,8 +23,12 @@ PRESETS = {
     "detailed": {"label": "Detailed", "resolution": 768, "spacing": .5, "strokes": 14000,
                  "sample": .45, "tolerance": .1, "feed": 6, "wave_points": 55000, "hatch_pitch": 1.4, "hatch_strokes": 4000,
                  "description": "Denser shading and finer outlines; longer plots."},
+    "ultra": {"label": "Ultra", "resolution": 2048, "spacing": .3, "strokes": 400000,
+              "sample": .3, "tolerance": .04, "feed": 6, "wave_points": 800000, "hatch_pitch": .6, "hatch_strokes": 120000,
+              "wave_min_pitch": .5, "sketch_shapes": 400, "sketch_min_mm": .6,
+              "description": "As fine as the pen allows; plots can run many hours and upload in parts."},
 }
-MAX_DIMENSION = 768
+MAX_DIMENSION = 4096
 BAYER = ((0, 8, 2, 10), (12, 4, 14, 6), (3, 11, 1, 9), (15, 7, 13, 5))
 
 
@@ -39,7 +43,7 @@ def decode_gray(image):
     if not isinstance(image, dict): raise ValueError("Invalid image data")
     w, h = image.get("width"), image.get("height")
     if type(w) is not int or type(h) is not int or not 2 <= w <= MAX_DIMENSION or not 2 <= h <= MAX_DIMENSION:
-        raise ValueError("Image dimensions must be 2–768 pixels after resizing")
+        raise ValueError("Image dimensions must be 2–%d pixels after resizing" % MAX_DIMENSION)
     encoded = image.get("pixels")
     if not isinstance(encoded, str) or len(encoded) > 4*((w*h+2)//3):
         raise ValueError("Invalid grayscale image size")
@@ -149,7 +153,7 @@ def wave_paths(w, h, pixels, scale, config):
     per_period = 8
     dark = tone(w, h, pixels)
     width_mm, height_mm = w*scale, h*scale
-    pitch = max(1.5, config.get("pen_pitch",0), math.sqrt(width_mm*height_mm*per_period/config["wave_points"]))
+    pitch = max(config.get("wave_min_pitch",1.5), config.get("pen_pitch",0), math.sqrt(width_mm*height_mm*per_period/config["wave_points"]))
     rows = max(2, int(height_mm/pitch))
     pitch = height_mm/rows
     dark = box_blur(dark, max(1, round(pitch/scale)))
@@ -190,6 +194,78 @@ def wave_paths(w, h, pixels, scale, config):
     return paths
 
 
+SKETCH_LEVELS = (.18, .42, .66)   # darkness at which a nested, darker shape begins
+SKETCH_MAX_SHAPES = 60   # default; a preset may raise it with "sketch_shapes"
+
+
+def _components(mask, w, h):
+    """4-connected components of a boolean mask as flat index arrays, largest first."""
+    flat = mask.ravel()
+    seen = np.zeros(flat.size, bool)
+    found = []
+    for start in np.flatnonzero(flat):
+        if seen[start]: continue
+        seen[start] = True
+        stack, members = [start], []
+        while stack:
+            i = stack.pop()
+            members.append(i)
+            x, y = i%w, i//w
+            for ok, j in ((x > 0, i-1), (x < w-1, i+1), (y > 0, i-w), (y < h-1, i+w)):
+                if ok and flat[j] and not seen[j]:
+                    seen[j] = True
+                    stack.append(j)
+        found.append(np.array(members))
+    return sorted(found, key=len, reverse=True)
+
+
+def sketch_paths(w, h, pixels, scale, config, bridge_mm=0):
+    """Draw like a person: block in each shape's outline, then shade it, shape by shape.
+
+    Shapes are connected areas at three nested darkness levels. Larger, lighter
+    shapes are drawn first and the darker shapes inside them follow, so a partly
+    finished plot already reads as the picture. Each shape owns the pixels not
+    claimed by a kept darker shape, so no area is hatched twice.
+    """
+    if np is None:
+        raise ValueError("Human sketch style needs numpy on the controller (apt install python3-numpy)")
+    dark = tone(w, h, pixels)
+    soft = box_blur(dark, max(1, round(1./scale)))
+    min_area = max(4., (config.get("sketch_min_mm",1.5)/scale)**2)
+    shapes = []                                   # (level, member indices)
+    for level, cut in enumerate(SKETCH_LEVELS):
+        comps = [c for c in _components(soft > cut, w, h) if len(c) >= min_area]
+        shapes.extend((level, c) for c in comps)
+    shapes = sorted(shapes, key=lambda s: len(s[1]), reverse=True)[:config.get("sketch_shapes",SKETCH_MAX_SHAPES)]
+    if not shapes: return []
+    owner = np.full(w*h, -1, np.int32)
+    for number in sorted(range(len(shapes)), key=lambda n: (-shapes[n][0], len(shapes[n][1]))):
+        members = shapes[number][1]
+        owner[members[owner[members] < 0]] = number
+    pitch = config["hatch_pitch"]
+    tolerance = config["tolerance"]/scale
+    order = sorted(range(len(shapes)), key=lambda n: (shapes[n][0], -len(shapes[n][1])))
+    for _ in range(8):
+        paths = []
+        for number in order:
+            members = shapes[number][1]
+            xs, ys = members%w, members//w
+            x0, x1, y0, y1 = xs.min(), xs.max()+1, ys.min(), ys.max()+1
+            region = np.zeros((y1-y0, x1-x0), bool)
+            region[ys-y0, xs-x0] = True
+            mask = region.astype(np.uint8)
+            outline = outlines(x1-x0, y1-y0, bytes((1-mask).ravel()*255), 128, tolerance)
+            for path in outline:
+                paths.append([(x+x0, y+y0) for x, y in path])
+            mine = (owner.reshape(h, w)[y0:y1, x0:x1] == number)
+            local = np.where(mine, soft[y0:y1, x0:x1], 0.)
+            for path in hatch_layers(local, x1-x0, y1-y0, scale, pitch, bridge_mm):
+                paths.append([(x+x0, y+y0) for x, y in path])
+        if len(paths) <= config["hatch_strokes"]: return paths
+        pitch *= 1.3
+    raise ValueError("Human sketch needs too many pen lifts; choose Fast or smaller paper")
+
+
 def simplify(path, tolerance):
     """Iterative RDP: no recursion overflow on long traced contours."""
     if len(path) < 3: return path
@@ -200,7 +276,7 @@ def simplify(path, tolerance):
         start, end = stack.pop()
         if end-start < 2: continue
         work += end-start-1
-        if work > 2_000_000: raise ValueError("Outline too complex; choose Fast or a simpler image")
+        if work > 40_000_000: raise ValueError("Outline too complex; choose Fast or a simpler image")
         distance, index = max((distance_line(path[i], path[start], path[end]), i)
                               for i in range(start+1, end))
         if distance > tolerance:
@@ -282,7 +358,7 @@ def raster_paths(image, options):
             columns = max(1, int(columns/factor))
             rows = max(1, int(rows/factor))
             adjusted = True
-        if columns*rows > 2_000_000: raise ValueError("Shading too dense; choose Fast or smaller paper")
+        if columns*rows > 20_000_000: raise ValueError("Shading too dense; choose Fast or smaller paper")
         paths = []
         for row in range(rows):
             y = (row+.5)*h/rows
@@ -300,12 +376,14 @@ def raster_paths(image, options):
                     start = None
             # Alternate direction to reduce pen-up travel across the page.
             paths.extend([list(reversed(p)) for p in reversed(runs)] if row%2 else runs)
-            if len(paths)*6 > 95_000: raise ValueError("Image needs too many pen lifts; choose Fast or smaller paper")
+            if len(paths)*6 > MAX_POINTS: raise ValueError("Image needs too many pen lifts; choose Fast or smaller paper")
     elif mode == "wave":
         paths = wave_paths(w, h, pixels, scale, config)
-        if sum(map(len, paths)) > 95_000: raise ValueError("Wavy lines need too many points; choose Fast or smaller paper")
+        if sum(map(len, paths)) > MAX_POINTS: raise ValueError("Wavy lines need too many points; choose Fast or smaller paper")
     elif mode == "crosshatch":
         paths = hatch_paths(w, h, pixels, scale, config, bridge)
+    elif mode == "sketch":
+        paths = sketch_paths(w, h, pixels, scale, config, bridge)
     else: raise ValueError("Unknown image conversion style")
     if not paths: raise ValueError("No drawable marks found; try another style or adjust the outline threshold")
     warnings = ["Image converted to monochrome pen strokes. A working pen-lift servo is required.",

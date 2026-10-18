@@ -13,7 +13,7 @@ def simplify(path, tolerance):
         if b-a < 2:
             continue
         work += b-a-1
-        if work > 2_000_000:  # Keep the input detail rather than failing preparation.
+        if work > 40_000_000:  # Keep the input detail rather than failing preparation.
             return path
         distance, i = max((distance_line(path[i], path[a], path[b]), i) for i in range(a+1, b))
         if distance > tolerance:

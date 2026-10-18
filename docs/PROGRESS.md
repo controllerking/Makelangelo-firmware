@@ -1,5 +1,15 @@
 # Development Progress Log
 
+## 2026-10-18 — Human sketch image style
+
+- New `image_mode: sketch`: finds connected shapes at three nested darkness levels, then draws each shape's
+  outline followed by its own tone-layered hatching. Larger/lighter shapes go first, darker shapes inside them after,
+  so a partial plot already reads as the picture. Each shape owns only the pixels not claimed by a kept darker
+  shape (no double hatching); at most 60 shapes, hatch pitch widens until the preset's stroke budget fits.
+- Needs numpy (same as Wavy/Crosshatch). Costs more pen lifts than Wavy; travel order is area-descending, not optimised.
+- Validation: 14 raster tests pass (new nesting/order test); synthetic 768x576 image stays under the 65,536-command
+  limit at all presets. Not yet deployed (controller restart needed; wait for the running streamed job to finish).
+
 ## 2026-10-16 — plot-file reclamation and Stop clarification
 
 - Reclaim completed/stopped files after motion/servo settling; remove failed-commit scratch and boot orphans; expire idle partial uploads after two minutes and unstarted verified files after ten.

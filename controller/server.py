@@ -22,7 +22,7 @@ from .config import ENV_FILE, RobotConfig, load_robot_config
 from .calibration import CORNERS, fit, reference_command
 
 ROOT = Path(__file__).parent
-MAX_BODY = 2_500_000
+MAX_BODY = 80_000_000   # large grayscale/RGB images and SVGs; LAN-only service
 
 def save_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -348,7 +348,7 @@ class Controller:
             title = str(data.get("name", "Untitled drawing"))[:120]
         options["servo_speed"] = device.get("servo_speed",35)
         # Hatch paths already follow layer/serpentine ordering; opt-in routing is for SVG/outlines.
-        if metadata.get("image_mode") in ("wave","crosshatch","hatching"):
+        if metadata.get("image_mode") in ("wave","crosshatch","hatching","sketch"):
             options["optimize_travel"] = False
         prepared = prepare(paths, options, device.get("pen_up",90), device.get("pen_down",40), source_bounds)
         prepared.update(metadata, feed=float(options["feed"]))

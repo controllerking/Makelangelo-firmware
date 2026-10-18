@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from controller.artwork import prepare
+from controller.artwork import prepare, MAX_COMMANDS
 from controller.raster import decode_gray, raster_paths, simplify, PRESETS, np as raster_np
 from controller.server import Controller
 
@@ -90,7 +90,8 @@ class WaveTests(unittest.TestCase):
             self.assertLessEqual(sum(map(len,paths)),cfg["wave_points"]*1.1)
             self.assertEqual(meta["image_mode"],"wave")
             job,_,_ = self.convert(image(value=0),image_mode="wave",quality=key)
-            self.assertLessEqual(job["command_count"],65536)
+            # Presets up to Detailed fit one device file; Ultra is split into uploaded parts.
+            self.assertLessEqual(job["command_count"],MAX_COMMANDS if key=="ultra" else 65536)
 
     def test_wave_swings_more_where_darker_and_skips_white(self):
         with self.assertRaises(ValueError): raster_paths(image(value=255),dict(OPTIONS,image_mode="wave"))
@@ -117,6 +118,36 @@ class WaveTests(unittest.TestCase):
         self.assertGreater(dark,mid); self.assertGreater(mid,light)
         job,_,_ = self.convert(image(value=0),image_mode="crosshatch",quality="detailed")
         self.assertLessEqual(job["command_count"],65536)
+
+    def test_sketch_draws_outer_shape_before_nested_dark_shape(self):
+        w,h = 96,96
+        def px(x,y):
+            if 36 <= x < 60 and 36 <= y < 60: return 20      # dark core
+            if 12 <= x < 84 and 12 <= y < 84: return 170     # light-grey body
+            return 255
+        paths,_,meta,_ = raster_paths(image(w,h,px),dict(OPTIONS,image_mode="sketch",quality="balanced"))
+        self.assertEqual(meta["image_mode"],"sketch")
+        self.assertLessEqual(len(paths),PRESETS["balanced"]["hatch_strokes"])
+        def centre(p): return sum(x for x,_ in p)/len(p), sum(y for _,y in p)/len(p)
+        core = [i for i,p in enumerate(paths) if 36 <= centre(p)[0] <= 60 and 36 <= centre(p)[1] <= 60
+                and all(30 <= x <= 66 and 30 <= y <= 66 for x,y in p)]
+        body = [i for i,p in enumerate(paths) if any(x < 30 or x > 66 or y < 30 or y > 66 for x,y in p)]
+        self.assertTrue(core and body)
+        self.assertLess(min(body),min(core))                      # body outline first
+        self.assertTrue(any(p[0] == p[-1] for p in paths))        # closed outlines present
+        with self.assertRaises(ValueError): raster_paths(image(value=255),dict(OPTIONS,image_mode="sketch"))
+        job,_,_ = self.convert(image(w,h,px),image_mode="sketch",quality="detailed")
+        self.assertLessEqual(job["command_count"],65536)
+
+    def test_ultra_preset_allows_far_more_detail_than_detailed(self):
+        data = image(64,64,lambda x,y: (x*4+y*2)%256)
+        counts = {}
+        for key in ("detailed","ultra"):
+            for mode in ("wave","crosshatch","sketch"):
+                job,_,_ = self.convert(data,image_mode=mode,quality=key)
+                counts[key,mode] = job["command_count"]
+        for mode in ("wave","crosshatch","sketch"):
+            self.assertGreater(counts["ultra",mode],counts["detailed",mode])
 
     def test_wave_strokes_far_fewer_than_hatching(self):
         data = image(value=100)
